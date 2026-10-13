@@ -1,0 +1,104 @@
+// DRAFT: shared contract for all tracks. Finalize in Week 1 before coding against it.
+syntax = "proto3";
+
+package tracewell.v1;
+
+option go_package = "github.com/eugenelacatis/tracewell/proto/tracewellv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// Kafka topics (key = project_id for per-tenant ordering and partition affinity):
+//   traces.raw     -> IngestBatch
+//   evals.results  -> EvalResult
+//   traces.dlq     -> DeadLetter
+
+enum SpanKind {
+  SPAN_KIND_UNSPECIFIED = 0;
+  SPAN_KIND_GENERATION = 1; // an LLM call
+  SPAN_KIND_RETRIEVAL = 2;
+  SPAN_KIND_TOOL = 3;
+  SPAN_KIND_CHAIN = 4;
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_OK = 1;
+  STATUS_ERROR = 2;
+}
+
+message Usage {
+  uint32 prompt_tokens = 1;
+  uint32 completion_tokens = 2;
+  uint32 total_tokens = 3;
+  double cost_usd = 4;
+}
+
+message Generation {
+  string provider = 1; // openai, anthropic, ...
+  string model = 2;
+  string prompt = 3; // serialized messages
+  string completion = 4;
+  google.protobuf.Struct params = 5; // temperature, max_tokens, ...
+  Usage usage = 6;
+}
+
+message Span {
+  string span_id = 1;
+  string trace_id = 2;
+  string parent_span_id = 3;
+  string name = 4;
+  SpanKind kind = 5;
+  google.protobuf.Timestamp start_time = 6;
+  google.protobuf.Timestamp end_time = 7;
+  Status status = 8;
+  string error_message = 9;
+  Generation generation = 10; // set when kind = GENERATION
+  google.protobuf.Struct metadata = 11;
+}
+
+message Trace {
+  string trace_id = 1;
+  string project_id = 2;
+  string session_id = 3;
+  string user_id = 4;
+  string name = 5;
+  repeated string tags = 6;
+  google.protobuf.Timestamp start_time = 7;
+  google.protobuf.Timestamp end_time = 8;
+  repeated Span spans = 9;
+}
+
+message IngestBatch {
+  string idempotency_key = 1; // writer dedupes on this
+  string project_id = 2;      // set by ingest-svc from API key, never trusted from client
+  repeated Trace traces = 3;
+}
+
+message EvalResult {
+  string trace_id = 1;
+  string span_id = 2;
+  string project_id = 3;
+  string evaluator = 4; // llm_judge, toxicity, pii, ...
+  double score = 5;
+  string label = 6;
+  string reasoning = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message DeadLetter {
+  string source_topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  bytes payload = 4;
+  string error = 5;
+  uint32 attempts = 6;
+}
+
+message IngestResponse {
+  uint32 accepted = 1;
+}
+
+service IngestService {
+  rpc Ingest(IngestBatch) returns (IngestResponse);
+}
