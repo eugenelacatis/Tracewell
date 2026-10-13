@@ -3,7 +3,7 @@ syntax = "proto3";
 
 package tracewell.v1;
 
-option go_package = "github.com/eugenelacatis/cmpe273group4/proto/tracewellv1";
+option go_package = "github.com/eugenelacatis/tracewell/proto/tracewellv1";
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
