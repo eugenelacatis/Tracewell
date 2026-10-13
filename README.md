@@ -1,11 +1,11 @@
-# rescan.ai: Distributed LLM Observability Platform
+# Tracewell: Distributed LLM Observability Platform
 
 Team: Eugene Lacatis, Rosnita Dey, Robbie Tambunting, Lucas Nguyen
 
 ## Abstract
 
-rescan.ai is an observability platform for applications built on large language models. An app sends
-every LLM call (prompt, completion, model, tokens, cost, latency) to rescan through a lightweight Python
+Tracewell is an observability platform for applications built on large language models. An app sends
+every LLM call (prompt, completion, model, tokens, cost, latency) to Tracewell through a lightweight Python
 or TypeScript SDK. A Go ingest service accepts those traces and publishes them to Kafka. From there,
 independent consumers write them to a sharded and replicated ClickHouse cluster, score them with
 asynchronous eval workers (LLM-as-judge, toxicity, PII, latency), and watch sliding windows of cost,
@@ -20,7 +20,7 @@ consumers, retries, Kubernetes autoscaling, chaos tests that kill a broker and a
 
 ## Business Value
 
-- **Cost control.** LLM API spend grows quickly and unevenly. rescan shows cost per project, model and
+- **Cost control.** LLM API spend grows quickly and unevenly. Tracewell shows cost per project, model and
   request, and alerts on spikes before the monthly bill does.
 - **Quality and safety.** Automated evals flag hallucinations, toxic output and leaked PII on real
   production traffic, not only in offline tests.

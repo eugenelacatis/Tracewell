@@ -1,4 +1,4 @@
-# rescan.ai — LLM Observability Platform: Project Plan (CMPE 273)
+# Tracewell — LLM Observability Platform: Project Plan (CMPE 273)
 
 ## Context
 Team: Eugene Lacatis, Rosnita Dey, Robbie Tambunting, Lucas Nguyen. The repo has only a README stub.

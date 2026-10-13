@@ -1,4 +1,4 @@
-# rescan.ai: Claude Code project rules
+# Tracewell: Claude Code project rules
 
 Distributed LLM observability platform (CMPE 273). Four teammates each work in their own Claude Code
 session. These rules keep those sessions consistent. Full plan: `docs/PLAN.md`.
@@ -84,7 +84,7 @@ stop and tell the user which track owns it and what change is needed. Don't make
 ```
 docker compose up -d    # Kafka :9092, ClickHouse :8123/:9000, Postgres :5432, Redis :6379
 ```
-The local credentials in `docker-compose.yml` are `rescan` / `rescan`. Real secrets never go in the
+The local credentials in `docker-compose.yml` are `tracewell` / `tracewell`. Real secrets never go in the
 repo, and `.env*` files are never committed.
 
 ## Git

@@ -25,9 +25,9 @@ services:
       - "8123:8123"
       - "9000:9000"
     environment:
-      CLICKHOUSE_DB: rescan
-      CLICKHOUSE_USER: rescan
-      CLICKHOUSE_PASSWORD: rescan
+      CLICKHOUSE_DB: tracewell
+      CLICKHOUSE_USER: tracewell
+      CLICKHOUSE_PASSWORD: tracewell
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     volumes:
@@ -38,9 +38,9 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_DB: rescan
-      POSTGRES_USER: rescan
-      POSTGRES_PASSWORD: rescan
+      POSTGRES_DB: tracewell
+      POSTGRES_USER: tracewell
+      POSTGRES_PASSWORD: tracewell
     volumes:
       - postgres-data:/var/lib/postgresql/data
 

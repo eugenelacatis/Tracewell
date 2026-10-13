@@ -1,9 +1,9 @@
 // DRAFT: shared contract for all tracks. Finalize in Week 1 before coding against it.
 syntax = "proto3";
 
-package rescan.v1;
+package tracewell.v1;
 
-option go_package = "github.com/rescan-ai/rescan/proto/rescanv1";
+option go_package = "github.com/eugenelacatis/cmpe273group4/proto/tracewellv1";
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
