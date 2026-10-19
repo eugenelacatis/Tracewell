@@ -73,6 +73,8 @@ message IngestBatch {
   string idempotency_key = 1; // writer dedupes on this
   string project_id = 2;      // set by ingest-svc from API key, never trusted from client
   repeated Trace traces = 3;
+  string sdk_instance_id = 4; // random per SDK process
+  uint64 batch_seq = 5;       // monotonic per sdk_instance_id; writer tracks gaps
 }
 
 message EvalResult {

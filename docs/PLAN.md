@@ -83,6 +83,19 @@ query API (OpenAPI). Nobody codes against another track until these are merged.
    count), and queries keep serving.
 5. Show shard distribution (`system.parts` per shard) and consumer-group partition assignment.
 
+## Differentiation: provable completeness
+Hosted tools like Respan, LangSmith and Helicone already cover gateways, tracing, evals and alerts, so
+Tracewell won't compete on feature count. Its angle is showing that no trace was lost. Each SDK process
+picks a random `sdk_instance_id` and numbers its batches with `batch_seq` (1, 2, 3...). The writer
+tracks the highest contiguous `batch_seq` per instance and records any gaps. A dashboard page can then
+show sent vs. stored, open gaps, the DLQ count and per-stage lag, which turns the chaos demo (step 4
+above) into something visible in the product.
+
+Status: the two fields are in `proto/trace.proto` now so nobody codes against `IngestBatch` without
+them. The SDKs should fill them in from the start (Track A). The writer gap tracking (Track A) and the
+integrity page (Track D) wait until after the walking skeleton. Decide around Nov 9 whether to build
+them.
+
 ## On approval
 Write this plan to `docs/PLAN.md`, update `README.md` with the project summary and team tracks, and
 scaffold the monorepo directories + `proto/trace.proto` draft + `docker-compose.yml`.
