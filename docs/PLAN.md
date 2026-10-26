@@ -69,6 +69,19 @@ query API (OpenAPI). Nobody codes against another track until these are merged.
 5. **Wk 8 (to Nov 30): EKS + polish.** Deploy to EKS, Grafana dashboards, report draft.
 6. **Wk 9 (to Dec 5): Buffer + demo rehearsal.**
 
+## Rounds
+Work moves in rounds. Each round goes contracts, then parallel build, then integration, then
+assessment. Contracts live in `docs/contracts/`, each track's brief in `docs/tracks/`, and the
+end-to-end check plus the assessment template in `docs/INTEGRATION.md`. The rounds map onto the
+milestones above, and nothing in this plan is cut:
+
+| Round | Covers |
+|---|---|
+| 1 | Walking skeleton: Python SDK, HTTP ingest, writer, rule-based evals, alerter skeleton, query-svc, trace list/detail, compose, CI |
+| 2 | TS SDK, gRPC ingest, Redis rate limits and cache, gateway, auth/multi-tenancy, LLM-as-judge/toxicity/PII, full alerter, dashboard charts/sessions/alert CRUD, kind + Helm, Strimzi x3, ClickHouse 2x2, Prometheus/Grafana |
+| 3 | DLQ replay CLI, retries, HPA, chaos tests, k6 load test |
+| 4 | Writer gap tracking + integrity page, EKS deploy, report, demo rehearsal |
+
 ## Team process
 - GitHub Projects board with one swimlane per track. Each PR needs 1 review from another track.
 - Two short syncs per week (async standup in Discord/Slack on the other days).

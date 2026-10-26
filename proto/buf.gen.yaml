@@ -1,0 +1,12 @@
+version: v2
+plugins:
+  - remote: buf.build/protocolbuffers/go:v1.35.2
+    out: gen/go
+    opt: paths=source_relative
+  - remote: buf.build/grpc/go:v1.5.1
+    out: gen/go
+    opt: paths=source_relative
+  - remote: buf.build/protocolbuffers/python:v28.3
+    out: gen/python/tracewell_proto
+  - remote: buf.build/protocolbuffers/pyi:v28.3
+    out: gen/python/tracewell_proto
