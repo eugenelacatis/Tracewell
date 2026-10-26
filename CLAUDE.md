@@ -2,6 +2,7 @@
 
 Distributed LLM observability platform (CMPE 273). Four teammates each work in their own Claude Code
 session. These rules keep those sessions consistent. Full plan: `docs/PLAN.md`.
+Cross-track contracts: `docs/contracts/`. This round's brief per track: `docs/tracks/`.
 
 ## Architecture
 
@@ -21,8 +22,8 @@ stop and tell the user which track owns it and what change is needed. Don't make
 
 | Track | Folders |
 |---|---|
-| A: Write path | `sdk/`, `services/ingest/`, `services/writer/` |
-| B: Data platform & infra | `deploy/`, `docker-compose.yml`, `loadtest/`, `.github/`, ClickHouse/Postgres migrations |
+| A: Write path | `sdk/`, `services/ingest/`, `services/writer/`, `examples/` |
+| B: Data platform & infra | `deploy/`, `docker-compose.yml`, `loadtest/`, `.github/`, ClickHouse/Postgres migrations (`deploy/migrations/`) |
 | C: Evals & alerting | `workers/evals/`, `services/alerter/` |
 | D: Read path & product | `services/query/`, `web/`, gateway config |
 | Shared (all tracks review) | `proto/`, `docs/`, `CLAUDE.md` |
@@ -77,6 +78,7 @@ stop and tell the user which track owns it and what change is needed. Don't make
 | query-svc | 8082 |
 | alerter | 8083 |
 | writer-svc | 8084 (health/metrics only) |
+| eval-workers | 8085 (health/metrics only) |
 | web | 3000 |
 
 ## Local dev
