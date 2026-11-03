@@ -36,14 +36,16 @@ func openTest(t *testing.T) *ClickHouse {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, stmt := range strings.Split(string(schema), ";") {
-		var lines []string
-		for _, l := range strings.Split(stmt, "\n") {
-			if !strings.HasPrefix(strings.TrimSpace(l), "--") {
-				lines = append(lines, l)
-			}
+	// Drop "--" comments first (one contains a ';'), then run each statement.
+	var lines []string
+	for _, l := range strings.Split(string(schema), "\n") {
+		if i := strings.Index(l, "--"); i >= 0 {
+			l = l[:i]
 		}
-		if sql := strings.TrimSpace(strings.Join(lines, "\n")); sql != "" {
+		lines = append(lines, l)
+	}
+	for _, stmt := range strings.Split(strings.Join(lines, "\n"), ";") {
+		if sql := strings.TrimSpace(stmt); sql != "" {
 			if err := ch.Conn.Exec(ctx, sql); err != nil {
 				t.Fatalf("schema: %v\n%s", err, sql)
 			}
@@ -52,19 +54,21 @@ func openTest(t *testing.T) *ClickHouse {
 	return ch
 }
 
+func us(t time.Time) int64 { return t.UnixMicro() }
+
 func TestClickHouseReadPath(t *testing.T) {
 	ch := openTest(t)
 	defer ch.Close()
 	ctx := context.Background()
 	pid := fmt.Sprintf("proj_it_%d", time.Now().UnixNano())
-	base := time.Date(2026, 10, 26, 17, 0, 0, 0, time.UTC)
+	base := time.Date(2026, 10, 26, 17, 0, 0, 250000000, time.UTC) // sub-second on purpose
 
 	// Three traces, the two newest share a start_time so the trace_id tiebreak gets exercised.
 	traces := []struct {
 		id    string
 		start time.Time
 	}{
-		{"aaaa0000000000000000000000000001", base},
+		{"aaaa0000000000000000000000000001", base.Add(900 * time.Millisecond)}, // 0.1s before the cursor: rounding to seconds would drop it
 		{"aaaa0000000000000000000000000002", base.Add(time.Second)},
 		{"aaaa0000000000000000000000000003", base.Add(time.Second)},
 	}
@@ -73,8 +77,8 @@ func TestClickHouseReadPath(t *testing.T) {
 			if err := ch.Conn.Exec(ctx, `INSERT INTO tracewell.traces
 				(project_id, trace_id, session_id, user_id, name, tags, start_time, end_time,
 				 status, span_count, total_tokens, cost_usd, idempotency_key)
-				VALUES (?, ?, 's', 'u', 'chat turn', ['example'], ?, ?, 'OK', 2, 12, 0.0000045, 'k:1')`,
-				pid, tr.id, tr.start, tr.start.Add(1200*time.Millisecond)); err != nil {
+				VALUES (?, ?, 's', 'u', 'chat turn', ['example'], fromUnixTimestamp64Micro(?), fromUnixTimestamp64Micro(?), 'OK', 2, 12, 0.0000045, 'k:1')`,
+				pid, tr.id, us(tr.start), us(tr.start.Add(1200*time.Millisecond))); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -83,17 +87,18 @@ func TestClickHouseReadPath(t *testing.T) {
 			 error_message, provider, model, prompt, completion, params, prompt_tokens,
 			 completion_tokens, total_tokens, cost_usd, metadata)
 			VALUES
-			(?, ?, '00000000000000a1', '', 'root', 'SPAN', ?, ?, 'OK', '', '', '', '', '', '', 0, 0, 0, 0, '{}'),
-			(?, ?, '00000000000000a2', '00000000000000a1', 'openai.chat', 'GENERATION', ?, ?, 'OK', '',
-			 'openai', 'gpt-4o-mini', 'hi', 'Hello!', '{"temperature":0.2}', 9, 3, 12, 0.0000045, '{}')`,
-			pid, traces[0].id, base, base.Add(1200*time.Millisecond),
-			pid, traces[0].id, base.Add(100*time.Millisecond), base.Add(1100*time.Millisecond)); err != nil {
+			(?, ?, '00000000000000a1', '', 'root', 'SPAN', fromUnixTimestamp64Micro(?), fromUnixTimestamp64Micro(?), 'OK', '', '', '', '', '', '', 0, 0, 0, 0, ?),
+			(?, ?, '00000000000000a2', '00000000000000a1', 'openai.chat', 'GENERATION', fromUnixTimestamp64Micro(?), fromUnixTimestamp64Micro(?), 'OK', '',
+			 'openai', 'gpt-4o-mini', 'hi', 'Hello!', ?, 9, 3, 12, 0.0000045, ?)`,
+			pid, traces[0].id, us(base), us(base.Add(1200*time.Millisecond)), "{}",
+			pid, traces[0].id, us(base.Add(100*time.Millisecond)), us(base.Add(1100*time.Millisecond)),
+			`{"temperature":0.2}`, "{}"); err != nil {
 			t.Fatal(err)
 		}
 		if err := ch.Conn.Exec(ctx, `INSERT INTO tracewell.evals
 			(project_id, trace_id, span_id, evaluator, score, label, reasoning, created_at)
-			VALUES (?, ?, '00000000000000a2', 'latency', 1.0, 'ok', '1000ms', ?)`,
-			pid, traces[0].id, base.Add(2*time.Second)); err != nil {
+			VALUES (?, ?, '00000000000000a2', 'latency', 1.0, 'ok', '1000ms', fromUnixTimestamp64Micro(?))`,
+			pid, traces[0].id, us(base.Add(2*time.Second))); err != nil {
 			t.Fatal(err)
 		}
 	}

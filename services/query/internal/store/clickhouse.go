@@ -3,6 +3,10 @@
 // Every query uses FINAL. The tables are ReplacingMergeTree, so a Kafka redelivery can leave two
 // copies of a row until ClickHouse merges them in the background; FINAL collapses them at read time.
 // Every value comes in as a bound parameter (?), never formatted into the SQL string.
+//
+// Times are bound as microsecond integers through fromUnixTimestamp64Micro(?). Binding a
+// time.Time to a positional ? makes clickhouse-go round it to whole seconds, which would make a
+// cursor at 17:04:05.5 skip every trace between .0 and .5.
 package store
 
 import (
@@ -67,16 +71,18 @@ func (c *ClickHouse) ListTraces(ctx context.Context, p ListParams) ([]model.Trac
 	q := `SELECT ` + traceColumns + ` FROM tracewell.traces FINAL WHERE project_id = ?`
 	args := []any{p.ProjectID}
 	if !p.From.IsZero() {
-		q += ` AND start_time >= ?`
-		args = append(args, p.From)
+		q += ` AND start_time >= fromUnixTimestamp64Micro(?)`
+		args = append(args, p.From.UnixMicro())
 	}
 	if !p.To.IsZero() {
-		q += ` AND start_time < ?`
-		args = append(args, p.To)
+		q += ` AND start_time < fromUnixTimestamp64Micro(?)`
+		args = append(args, p.To.UnixMicro())
 	}
 	if p.AfterTraceID != "" {
-		q += ` AND (start_time < ? OR (start_time = ? AND trace_id < ?))`
-		args = append(args, p.AfterStartTime, p.AfterStartTime, p.AfterTraceID)
+		q += ` AND (start_time < fromUnixTimestamp64Micro(?)
+			OR (start_time = fromUnixTimestamp64Micro(?) AND trace_id < ?))`
+		after := p.AfterStartTime.UnixMicro()
+		args = append(args, after, after, p.AfterTraceID)
 	}
 	q += ` ORDER BY start_time DESC, trace_id DESC LIMIT ?`
 	args = append(args, p.Limit)
