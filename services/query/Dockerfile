@@ -1,6 +1,6 @@
 # Build from the repo root:
 #   docker build -f services/query/Dockerfile -t tracewell/query .
-FROM golang:1.26 AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src/services/query
 COPY services/query/go.mod services/query/go.sum ./
 RUN go mod download
