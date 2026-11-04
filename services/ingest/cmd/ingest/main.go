@@ -20,7 +20,10 @@ import (
 	"github.com/eugenelacatis/tracewell/services/ingest/internal/auth"
 )
 
-const topic = "traces.raw"
+const (
+	topic          = "traces.raw"
+	maxRecordBytes = 6 << 20
+)
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -63,6 +66,9 @@ func run(logger *slog.Logger) error {
 	kafka, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
+		// franz-go refuses records over 1 MB by default. A 5 MB request body (the contract limit)
+		// stays under 6 MiB as binary protobuf. The topic's max.message.bytes must allow it too.
+		kgo.ProducerBatchMaxBytes(maxRecordBytes),
 	)
 	if err != nil {
 		return err

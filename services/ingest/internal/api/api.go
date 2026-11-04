@@ -138,7 +138,9 @@ func decode(contentType string, body []byte, batch *tracewellv1.IngestBatch) err
 	mediaType, _, _ := mime.ParseMediaType(contentType)
 	switch mediaType {
 	case "application/json":
-		return protojson.Unmarshal(body, batch)
+		// Ignore unknown fields so a newer SDK that sends a field this server doesn't know yet
+		// still gets its traces stored (binary protobuf behaves the same way by design).
+		return protojson.UnmarshalOptions{DiscardUnknown: true}.Unmarshal(body, batch)
 	case "application/x-protobuf":
 		return proto.Unmarshal(body, batch)
 	default:

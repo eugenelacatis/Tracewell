@@ -85,6 +85,8 @@ func run(logger *slog.Logger) error {
 		// A brand-new group starts from the oldest retained message rather than only new ones.
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 		kgo.RequiredAcks(kgo.AllISRAcks()), // for the DLQ producer
+		// A DeadLetter carries the whole original message (up to ~5 MB), above franz-go's 1 MB default.
+		kgo.ProducerBatchMaxBytes(6<<20),
 	)
 	if err != nil {
 		return err

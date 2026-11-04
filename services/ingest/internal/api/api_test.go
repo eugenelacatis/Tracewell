@@ -168,7 +168,6 @@ func TestRejections(t *testing.T) {
 		{"bad key", "tw_wrong", "application/json", []byte(contractExample), 401, "unauthorized"},
 		{"postgres down", "pgdown", "application/json", []byte(contractExample), 503, "unavailable"},
 		{"bad json", "tw_good", "application/json", []byte(`{"traces": [`), 400, "invalid_argument"},
-		{"unknown json field", "tw_good", "application/json", []byte(`{"idempotencyKey":"k","nope":1}`), 400, "invalid_argument"},
 		{"bad protobuf", "tw_good", "application/x-protobuf", []byte{0xff, 0xff, 0xff}, 400, "invalid_argument"},
 		{"wrong content type", "tw_good", "text/plain", []byte(contractExample), 400, "invalid_argument"},
 		{"missing idempotency key", "tw_good", "application/json", []byte(`{"traces":[]}`), 400, "invalid_argument"},
@@ -185,6 +184,14 @@ func TestRejections(t *testing.T) {
 				t.Fatalf("produced %d records on a rejected request", len(p.records))
 			}
 		})
+	}
+}
+
+func TestUnknownJSONFieldsAreIgnored(t *testing.T) {
+	p := &fakeProducer{}
+	rec := post(newServer(p), "tw_good", "application/json", []byte(`{"idempotencyKey":"k:1","fromTheFuture":1,"traces":[]}`))
+	if rec.Code != http.StatusAccepted || len(p.records) != 1 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
 	}
 }
 
