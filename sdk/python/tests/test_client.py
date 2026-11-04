@@ -141,3 +141,21 @@ def test_config_from_env(monkeypatch):
     assert sent == {"url": "http://ingest:9999/v1/ingest", "api_key": "tw_env"}
     Tracewell(host="http://other", api_key="tw_arg")
     assert sent == {"url": "http://other/v1/ingest", "api_key": "tw_arg"}
+
+
+def test_cancelled_span_is_error(tw: Tracewell, rec: Recorder):
+    async def slow() -> None:
+        with tw.trace("t"), tw.span("llm call"):
+            await asyncio.sleep(10)
+
+    async def run() -> None:
+        task = asyncio.create_task(slow())
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    tw.flush()
+    [span] = rec.traces()[0]["spans"]
+    assert span["status"] == "STATUS_ERROR" and span["errorMessage"].startswith("CancelledError")

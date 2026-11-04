@@ -193,7 +193,7 @@ class Tracewell:
         token = _current_span.set(s)
         try:
             yield s
-        except Exception as e:
+        except BaseException as e:  # includes asyncio.CancelledError and KeyboardInterrupt
             s.set_error(f"{type(e).__name__}: {e}")
             raise
         finally:

@@ -164,3 +164,25 @@ def test_unencodable_trace_is_dropped_not_raised(caplog):
     [sent] = body["traces"]
     assert sent["x"].startswith("<object object")
     assert "could not encode" in caplog.text
+
+
+def test_nan_trace_is_dropped_alone_not_with_its_batch(caplog):
+    t = FakeTransport()
+    ex = make(t)
+    ex.enqueue({"traceId": "bad", "cost": float("nan")})  # NaN isn't valid JSON; ingest would 400 the batch
+    ex.enqueue(trace(1))
+    ex.flush()
+    assert [[tr["traceId"] for tr in b["traces"]] for b in t.bodies] == [[f"{1:032x}"]]
+    assert "could not encode" in caplog.text
+
+
+def test_retry_after_is_capped():
+    sleeps: list[float] = []
+
+    def transport(body: bytes) -> Response:
+        return Response(429, "3600") if not sleeps else Response(202)
+
+    ex = Exporter(transport, flush_interval_s=60, sleep=sleeps.append)
+    ex.enqueue(trace(1))
+    ex.flush()
+    assert sleeps == [30.0]

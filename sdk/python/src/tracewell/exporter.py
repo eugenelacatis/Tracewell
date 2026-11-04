@@ -27,6 +27,7 @@ MAX_BATCH_TRACES = 100
 MAX_BATCH_BYTES = 4 * 1024 * 1024
 MAX_QUEUED_TRACES = 10_000
 RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0, 8.0)
+MAX_RETRY_AFTER_S = 30.0  # a huge Retry-After must not stall the exporter (or exit) for an hour
 
 
 class Response(NamedTuple):
@@ -89,7 +90,7 @@ class Exporter:
 
     def enqueue(self, trace: dict[str, object]) -> None:
         try:
-            self._queue.put_nowait(json.dumps(trace, separators=(",", ":"), default=str))
+            self._queue.put_nowait(json.dumps(trace, separators=(",", ":"), default=str, allow_nan=False))
         except queue.Full:
             logger.warning("tracewell: buffer full (%d traces), dropping trace", MAX_QUEUED_TRACES)
         except Exception:
@@ -178,7 +179,7 @@ class Exporter:
             delay = RETRY_DELAYS_S[attempt] * random.uniform(0.8, 1.2)
             if resp.status == 429 and resp.retry_after:
                 try:
-                    delay = max(delay, float(resp.retry_after))
+                    delay = max(delay, min(float(resp.retry_after), MAX_RETRY_AFTER_S))
                 except ValueError:
                     pass
             self._sleep(delay)

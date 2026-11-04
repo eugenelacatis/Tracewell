@@ -56,7 +56,7 @@ def search(q: str) -> list[str]: ...
 | `@tw.observe(name=None, *, kind=None)` | Runs the function inside a span named after it. |
 | `tw.flush()` | Blocks until everything finished so far is sent. Also runs at exit. |
 
-An exception that leaves a span marks it `ERROR` with `"<Type>: <message>"` and is re-raised
+An exception that leaves a span (including `asyncio.CancelledError` and `KeyboardInterrupt`) marks it `ERROR` with `"<Type>: <message>"` and is re-raised
 unchanged. The current trace and span live in `contextvars`, so nesting follows threads and asyncio
 tasks without passing objects around.
 
@@ -71,11 +71,15 @@ tasks without passing objects around.
   later, to detect missing batches.
 - Responses: `202` done. `400`, `401`, `413` and other `4xx`: drop the batch and log a warning,
   since resending can't help. `5xx` or a network error: retry after 0.5s, 1s, 2s, 4s, 8s (each
-  ±20% jitter), then drop and log. `429`: same retries, waiting at least `Retry-After`.
+  ±20% jitter), then drop and log. `429`: same retries, waiting at least `Retry-After` (capped at
+  30s).
 - Tracewell never raises into your code because the server is down. Problems are logged as
   warnings on the `tracewell` logger.
-- `flush()` at exit waits for retries, so if ingest is down a short script can take ~15s to exit
-  before it gives up.
+- A trace that can't be encoded as JSON (for example a `NaN` cost) is dropped on its own with a
+  warning, so it can't make ingest reject the rest of its batch.
+- `flush()` at exit waits for retries. If ingest is down, a short script takes about 15s to exit
+  before giving up (refused connections), or up to about 75s if each attempt hits the 10s HTTP
+  timeout.
 
 ## Develop
 
