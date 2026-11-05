@@ -141,6 +141,7 @@ func (e *AlertEngine) ProcessBatch(ctx context.Context, batch *tracewellv1.Inges
 				"project_id", projID,
 				"error", err,
 			)
+			return err
 		}
 	}
 
@@ -195,8 +196,6 @@ func (e *AlertEngine) maybeFireAlert(
 		return nil
 	}
 
-	// Update lastFired
-	e.lastFired[rule.ID] = now
 	e.mu.Unlock()
 
 	message := fmt.Sprintf(
@@ -222,8 +221,11 @@ func (e *AlertEngine) maybeFireAlert(
 			"project_id", rule.ProjectID,
 			"error", err,
 		)
-		// We still attempt delivery even if DB insert fails
+		return fmt.Errorf("insert alert event: %w", err)
 	}
+	e.mu.Lock()
+	e.lastFired[rule.ID] = now
+	e.mu.Unlock()
 
 	// 2. Deliver to configured channel (log / webhook)
 	if err := e.dispatcher.Deliver(ctx, rule, event); err != nil {

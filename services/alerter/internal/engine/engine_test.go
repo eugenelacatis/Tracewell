@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -262,5 +263,36 @@ func TestRuleReload(t *testing.T) {
 	activeRules = engine.GetRules()
 	if len(activeRules) != 1 || activeRules[0].ID != 3 {
 		t.Fatalf("expected active rule ID 3 after reload, got %+v", activeRules)
+	}
+}
+
+func TestEventInsertFailureIsReturnedAndDoesNotStartCooldown(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	store := &mockStore{
+		insertErr: errors.New("postgres unavailable"),
+	}
+	dispatcher := &mockDispatcher{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	eng := NewAlertEngine(store, dispatcher, logger, func() time.Time { return now })
+	eng.SetRules([]model.AlertRule{{
+		ID: 1, ProjectID: "proj_dev", Name: "errors", Metric: "error_rate",
+		Threshold: 0.5, WindowSeconds: 60, CooldownSeconds: 300, Enabled: true,
+	}})
+	batch := &tracewellv1.IngestBatch{ProjectId: "proj_dev", Traces: []*tracewellv1.Trace{{
+		Spans: []*tracewellv1.Span{{Status: tracewellv1.Status_STATUS_ERROR}},
+	}}}
+
+	if err := eng.ProcessBatch(context.Background(), batch); err == nil {
+		t.Fatal("expected alert event insert failure to propagate")
+	}
+	store.mu.Lock()
+	store.insertErr = nil
+	store.mu.Unlock()
+	now = now.Add(time.Second)
+	if err := eng.ProcessBatch(context.Background(), batch); err != nil {
+		t.Fatalf("expected redelivery to persist the alert event: %v", err)
+	}
+	if got := len(store.getEvents()); got != 1 {
+		t.Fatalf("expected one persisted alert event after retry, got %d", got)
 	}
 }

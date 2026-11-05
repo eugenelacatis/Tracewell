@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"time"
 
 	tracewellv1 "github.com/eugenelacatis/tracewell/proto/tracewellv1"
 	"github.com/eugenelacatis/tracewell/services/alerter/internal/engine"
@@ -14,6 +15,7 @@ import (
 // Consumer consumes IngestBatches from Kafka traces.raw and passes them to engine.
 type Consumer struct {
 	reader *kafka.Reader
+	dlq    *kafka.Writer
 	engine *engine.AlertEngine
 	logger *slog.Logger
 }
@@ -37,9 +39,15 @@ func NewConsumer(
 		StartOffset:    kafka.FirstOffset,
 		CommitInterval: 0, // Manual commit per message
 	})
+	dlq := &kafka.Writer{
+		Addr:     kafka.TCP(brokers...),
+		Balancer: &kafka.Hash{},
+		Async:    false,
+	}
 
 	return &Consumer{
 		reader: reader,
+		dlq:    dlq,
 		engine: eng,
 		logger: logger,
 	}
@@ -63,24 +71,50 @@ func (c *Consumer) Run(ctx context.Context) error {
 			continue
 		}
 
+		var processErr error
 		var batch tracewellv1.IngestBatch
-		if err := proto.Unmarshal(msg.Value, &batch); err != nil {
-			c.logger.Warn("failed to unmarshal IngestBatch protobuf",
-				"topic", msg.Topic,
-				"partition", msg.Partition,
-				"offset", msg.Offset,
-				"error", err,
-			)
-			// Commit bad message so consumer group doesn't block
-			_ = c.reader.CommitMessages(ctx, msg)
-			continue
+		for attempt := uint32(1); attempt <= 3; attempt++ {
+			if err := proto.Unmarshal(msg.Value, &batch); err != nil {
+				processErr = err
+			} else {
+				processErr = c.engine.ProcessBatch(ctx, &batch)
+			}
+			if processErr == nil {
+				break
+			}
+			c.logger.Warn("failed processing Kafka message",
+				"topic", msg.Topic, "partition", msg.Partition,
+				"offset", msg.Offset, "attempt", attempt, "error", processErr)
 		}
 
-		if err := c.engine.ProcessBatch(ctx, &batch); err != nil {
-			c.logger.Error("failed to process batch in alert engine",
-				"project_id", batch.ProjectId,
-				"error", err,
-			)
+		if processErr != nil {
+			dl := &tracewellv1.DeadLetter{
+				SourceTopic: msg.Topic,
+				Partition:   int32(msg.Partition),
+				Offset:      msg.Offset,
+				Payload:     msg.Value,
+				Error:       processErr.Error(),
+				Attempts:    3,
+			}
+			payload, err := proto.Marshal(dl)
+			if err != nil {
+				return err
+			}
+			dlqMsg := kafka.Message{Topic: "traces.dlq", Key: msg.Key, Value: payload}
+			for {
+				if err := c.dlq.WriteMessages(ctx, dlqMsg); err == nil {
+					break
+				} else {
+					c.logger.Error("failed writing dead letter; source offset remains uncommitted", "error", err)
+				}
+				timer := time.NewTimer(time.Second)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return nil
+				case <-timer.C:
+				}
+			}
 		}
 
 		if err := c.reader.CommitMessages(ctx, msg); err != nil {
@@ -96,7 +130,11 @@ func (c *Consumer) Run(ctx context.Context) error {
 
 // Close shuts down the underlying Kafka reader.
 func (c *Consumer) Close() error {
-	return c.reader.Close()
+	err := c.reader.Close()
+	if closeErr := c.dlq.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 // SplitBrokers splits comma-delimited broker addresses.
