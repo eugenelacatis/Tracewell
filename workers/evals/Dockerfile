@@ -23,3 +23,4 @@ ENV EVALS_KAFKA_BROKERS="kafka:29092"
 EXPOSE 8085
 
 ENTRYPOINT ["python", "-m", "tracewell_evals.main"]
+

@@ -106,3 +106,4 @@ func (s *PgStore) Ping(ctx context.Context) error {
 func (s *PgStore) Close() {
 	s.pool.Close()
 }
+

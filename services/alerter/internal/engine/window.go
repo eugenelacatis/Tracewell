@@ -122,3 +122,4 @@ func (w *WindowTracker) Clear() {
 	defer w.mu.Unlock()
 	w.records = make(map[string][]SpanRecord)
 }
+

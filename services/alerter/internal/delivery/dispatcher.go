@@ -116,3 +116,4 @@ func (d *ChannelDispatcher) Deliver(ctx context.Context, rule model.AlertRule, e
 		return nil
 	}
 }
+

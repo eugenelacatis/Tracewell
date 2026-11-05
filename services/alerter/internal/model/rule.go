@@ -39,3 +39,4 @@ type WebhookPayload struct {
 	Message   string    `json:"message"`
 	FiredAt   time.Time `json:"fired_at"`
 }
+

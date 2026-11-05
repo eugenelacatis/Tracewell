@@ -58,3 +58,4 @@ func TestReadyz_NotReady(t *testing.T) {
 		t.Fatalf("expected 503, got %d", rec.Code)
 	}
 }
+

@@ -224,3 +224,4 @@ class EvalWorker:
     def stop(self) -> None:
         """Signal worker to stop after the current message is processed."""
         self._running = False
+

@@ -83,3 +83,4 @@ class HealthServer:
             self._server.shutdown()
             self._server.server_close()
             logger.info("Health server stopped")
+

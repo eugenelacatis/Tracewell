@@ -36,3 +36,4 @@ var (
 		Help: "Total count of errors encountered while reloading alert rules",
 	})
 )
+

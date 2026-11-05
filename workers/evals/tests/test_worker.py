@@ -211,3 +211,4 @@ def test_dlq_after_three_failures() -> None:
     assert dl.payload == b"this is definitely not a protobuf"
     assert dl.attempts == 3
     assert len(dl.error) > 0
+

@@ -110,3 +110,4 @@ def test_empty_completion_evaluator_no_generation() -> None:
     assert out is not None
     assert out.score == 0.0
     assert out.label == "empty"
+

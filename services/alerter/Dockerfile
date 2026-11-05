@@ -22,3 +22,4 @@ COPY --from=build /out/alerter /alerter
 
 EXPOSE 8083
 ENTRYPOINT ["/alerter"]
+
