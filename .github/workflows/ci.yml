@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a PR cancels the run it replaces.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Finds which modules exist, so a job runs only for code that is there (green from day one) and new
+  # modules get picked up without editing this file. Path filters would leave required checks pending.
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.find.outputs.go }}
+      python: ${{ steps.find.outputs.python }}
+      web: ${{ steps.find.outputs.web }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        run: |
+          go=$(for d in services/*/; do [ -f "${d}go.mod" ] && echo "${d%/}"; done | jq -R . | jq -sc .)
+          python=$(for d in workers/evals sdk/python; do [ -f "$d/pyproject.toml" ] && echo "$d"; done | jq -R . | jq -sc .)
+          web=$([ -f web/package.json ] && echo true || echo false)
+          {
+            echo "go=$go"
+            echo "python=$python"
+            echo "web=$web"
+          } >> "$GITHUB_OUTPUT"
+          echo "go=$go python=$python web=$web"
+
+  go:
+    needs: detect
+    if: needs.detect.outputs.go != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.detect.outputs.go) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: go vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+      - name: go test
+        working-directory: ${{ matrix.module }}
+        run: go test ./...
+
+  python:
+    needs: detect
+    if: needs.detect.outputs.python != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.detect.outputs.python) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ matrix.dir }}/uv.lock
+      - run: uv sync
+      - name: ruff
+        # TODO(Track C): workers/evals has no ruff dev dependency and ~40 lint findings, so its lint
+        # step cannot pass yet. It is non-blocking until Track C fixes that. Remove this
+        # continue-on-error line then, so evals lint is enforced like everywhere else.
+        continue-on-error: ${{ matrix.dir == 'workers/evals' }}
+        run: uv run ruff check
+      - name: pytest
+        run: uv run pytest
+
+  web:
+    needs: detect
+    if: needs.detect.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  # Fails if a PR changes proto/ in a way that breaks existing readers, such as reusing or renumbering
+  # a field. Compares the PR's proto/ with the one on main.
+  proto-breaking:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # needs main's history to compare against
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
+      - run: buf breaking proto --against '.git#ref=refs/remotes/origin/main,subdir=proto'
+
+  # Builds every image, starts the whole stack and waits for each app's /healthz. See the script.
+  # Once this has been green for a while, make it a required check in the repo's branch protection.
+  compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash deploy/scripts/smoke.sh

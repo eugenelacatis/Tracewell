@@ -7,17 +7,43 @@ services:
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      # Two addresses for the same broker. A client connects to the bootstrap address, and the broker
+      # replies "talk to me at <advertised address>". `localhost` inside another container is that
+      # container, so containers use kafka:29092 and the host keeps localhost:9092.
+      KAFKA_LISTENERS: PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_NUM_PARTITIONS: 6
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null"]
       interval: 10s
       retries: 10
+
+  # One-shot job: creates the topics and exits 0. --if-not-exists makes re-running harmless.
+  # max.message.bytes: the broker default (~1 MB) is below ingest's 5 MB body limit. traces.raw allows
+  # 6 MiB (ingest's producer limit); traces.dlq allows 8 MiB because it wraps the original payload.
+  kafka-init:
+    image: apache/kafka:3.8.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        create() {
+          topic="$$1"; shift
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists \
+            --topic "$$topic" --partitions 6 --replication-factor 1 "$$@"
+        }
+        create traces.raw --config max.message.bytes=6291456
+        create evals.results
+        create traces.dlq --config max.message.bytes=8388608
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
@@ -32,6 +58,18 @@ services:
       nofile: { soft: 262144, hard: 262144 }
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+      # Every .sql file here runs once, on an empty data volume only. Reset with `docker compose down -v`.
+      - ./deploy/migrations/clickhouse:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Healthy only once the migration has created all 4 tables. Plain ping would pass too early,
+      # because the image starts a throwaway server while it runs the init scripts.
+      test:
+        - CMD-SHELL
+        - >-
+          test "$$(clickhouse-client -u tracewell --password tracewell
+          -q "SELECT count() FROM system.tables WHERE database = 'tracewell'")" = 4
+      interval: 5s
+      retries: 20
 
   postgres:
     image: postgres:16
@@ -43,11 +81,131 @@ services:
       POSTGRES_PASSWORD: tracewell
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      # Every .sql file here runs once, on an empty data volume only. Reset with `docker compose down -v`.
+      - ./deploy/migrations/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # TCP on 127.0.0.1 (the init-time server only listens on a unix socket), and the seed key must
+      # exist, so healthy means the migration has run.
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD=tracewell psql -h 127.0.0.1 -U tracewell -d tracewell -tA
+          -c "SELECT count(*) FROM api_keys" | grep -qx '[1-9][0-9]*'
+      interval: 5s
+      retries: 20
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  # ---- App services -------------------------------------------------------------------------------
+  # Off by default so `docker compose up -d` stays infra-only. Run everything with:
+  #   docker compose --profile apps up -d --build
+  # Each image is built from the repo root (the Go services and evals need proto/gen), using the
+  # Dockerfile in the owning track's folder. `depends_on` makes an app wait until the databases have
+  # their tables (healthy) and the Kafka topics exist (kafka-init finished).
+  # Healthchecks hit /healthz (process is up). /readyz (dependencies reachable) is checked separately.
+
+  ingest:
+    profiles: [apps]
+    build: { context: ., dockerfile: services/ingest/Dockerfile }
+    ports:
+      - "8081:8081"
+    environment:
+      INGEST_HTTP_ADDR: ":8081"
+      INGEST_KAFKA_BROKERS: kafka:29092
+      INGEST_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
+      interval: 5s
+      retries: 12
+
+  writer:
+    profiles: [apps]
+    build: { context: ., dockerfile: services/writer/Dockerfile }
+    ports:
+      - "8084:8084"
+    environment:
+      WRITER_HTTP_ADDR: ":8084"
+      WRITER_KAFKA_BROKERS: kafka:29092
+      WRITER_CLICKHOUSE_DSN: clickhouse://tracewell:tracewell@clickhouse:9000/tracewell
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+      clickhouse: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8084/healthz"]
+      interval: 5s
+      retries: 12
+
+  query:
+    profiles: [apps]
+    build: { context: ., dockerfile: services/query/Dockerfile }
+    ports:
+      - "8082:8082"
+    environment:
+      QUERY_HTTP_ADDR: ":8082"
+      QUERY_CLICKHOUSE_DSN: clickhouse://tracewell:tracewell@clickhouse:9000/tracewell
+      QUERY_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
+    depends_on:
+      clickhouse: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8082/healthz"]
+      interval: 5s
+      retries: 12
+
+  alerter:
+    profiles: [apps]
+    build: { context: ., dockerfile: services/alerter/Dockerfile }
+    ports:
+      - "8083:8083"
+    environment:
+      ALERTER_HTTP_ADDR: ":8083"
+      ALERTER_KAFKA_BROKERS: kafka:29092
+      ALERTER_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8083/healthz"]
+      interval: 5s
+      retries: 12
+
+  evals:
+    profiles: [apps]
+    build: { context: ., dockerfile: workers/evals/Dockerfile }
+    ports:
+      - "8085:8085"
+    environment:
+      EVALS_HTTP_ADDR: ":8085"
+      EVALS_KAFKA_BROKERS: kafka:29092
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+    healthcheck:
+      # This image is python:slim (no wget); it installs curl instead.
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8085/healthz"]
+      interval: 5s
+      retries: 12
+
+  # No healthcheck yet: web has no /healthz route. Track D needs to add `GET /healthz` returning 200.
+  web:
+    profiles: [apps]
+    build: { context: ., dockerfile: web/Dockerfile }
+    ports:
+      - "3000:3000"
+    environment:
+      WEB_QUERY_URL: http://query:8082
+      WEB_API_KEY: tw_dev_localkey
+    depends_on:
+      query: { condition: service_healthy }
 
 volumes:
   clickhouse-data:
