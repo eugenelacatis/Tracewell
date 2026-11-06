@@ -25,7 +25,7 @@ stop and tell the user which track owns it and what change is needed. Don't make
 | A: Write path | `sdk/`, `services/ingest/`, `services/writer/`, `examples/` |
 | B: Data platform & infra | `deploy/`, `docker-compose.yml`, `loadtest/`, `.github/`, ClickHouse/Postgres migrations (`deploy/migrations/`) |
 | C: Evals & alerting | `workers/evals/`, `services/alerter/` |
-| D: Read path & product | `services/query/`, `web/`, gateway config |
+| D: Read path & product | `services/query/`, `web/`, `gateway/` |
 | Shared (all tracks review) | `proto/`, `docs/`, `CLAUDE.md` |
 
 ## Contract rules (`proto/`)
@@ -80,6 +80,8 @@ stop and tell the user which track owns it and what change is needed. Don't make
 | writer-svc | 8084 (health/metrics only) |
 | eval-workers | 8085 (health/metrics only) |
 | web | 3000 |
+| gateway (Envoy) | 8080 (HTTP + gRPC), 9901 (admin) |
+| Prometheus / Grafana | 9090 / 3300 |
 
 ## Local dev
 
