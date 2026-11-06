@@ -103,6 +103,110 @@ services:
       interval: 5s
       retries: 10
 
+  # ---- App services -------------------------------------------------------------------------------
+  # Off by default so `docker compose up -d` stays infra-only. Run everything with:
+  #   docker compose --profile apps up -d --build
+  # Each image is built from the repo root (the Go services and evals need proto/gen), using the
+  # Dockerfile in the owning track's folder. `depends_on` makes an app wait until the databases have
+  # their tables (healthy) and the Kafka topics exist (kafka-init finished).
+  # Healthchecks hit /healthz (process is up). /readyz (dependencies reachable) is checked separately.
+
+  ingest:
+    profiles: [apps]
+    build: { context: ., dockerfile: services/ingest/Dockerfile }
+    ports:
+      - "8081:8081"
+    environment:
+      INGEST_HTTP_ADDR: ":8081"
+      INGEST_KAFKA_BROKERS: kafka:29092
+      INGEST_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
+      interval: 5s
+      retries: 12
+
+  writer:
+    profiles: [apps]
+    build: { context: ., dockerfile: services/writer/Dockerfile }
+    ports:
+      - "8084:8084"
+    environment:
+      WRITER_HTTP_ADDR: ":8084"
+      WRITER_KAFKA_BROKERS: kafka:29092
+      WRITER_CLICKHOUSE_DSN: clickhouse://tracewell:tracewell@clickhouse:9000/tracewell
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+      clickhouse: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8084/healthz"]
+      interval: 5s
+      retries: 12
+
+  query:
+    profiles: [apps]
+    build: { context: ., dockerfile: services/query/Dockerfile }
+    ports:
+      - "8082:8082"
+    environment:
+      QUERY_HTTP_ADDR: ":8082"
+      QUERY_CLICKHOUSE_DSN: clickhouse://tracewell:tracewell@clickhouse:9000/tracewell
+      QUERY_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
+    depends_on:
+      clickhouse: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8082/healthz"]
+      interval: 5s
+      retries: 12
+
+  alerter:
+    profiles: [apps]
+    build: { context: ., dockerfile: services/alerter/Dockerfile }
+    ports:
+      - "8083:8083"
+    environment:
+      ALERTER_HTTP_ADDR: ":8083"
+      ALERTER_KAFKA_BROKERS: kafka:29092
+      ALERTER_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8083/healthz"]
+      interval: 5s
+      retries: 12
+
+  evals:
+    profiles: [apps]
+    build: { context: ., dockerfile: workers/evals/Dockerfile }
+    ports:
+      - "8085:8085"
+    environment:
+      EVALS_HTTP_ADDR: ":8085"
+      EVALS_KAFKA_BROKERS: kafka:29092
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+    healthcheck:
+      # This image is python:slim (no wget); it installs curl instead.
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8085/healthz"]
+      interval: 5s
+      retries: 12
+
+  # No healthcheck yet: web has no /healthz route. Track D needs to add `GET /healthz` returning 200.
+  web:
+    profiles: [apps]
+    build: { context: ., dockerfile: web/Dockerfile }
+    ports:
+      - "3000:3000"
+    environment:
+      WEB_QUERY_URL: http://query:8082
+      WEB_API_KEY: tw_dev_localkey
+    depends_on:
+      query: { condition: service_healthy }
+
 volumes:
   clickhouse-data:
   postgres-data:
