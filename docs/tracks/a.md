@@ -3,73 +3,58 @@
 Folders: `sdk/`, `services/ingest/`, `services/writer/`, `examples/`
 DS concept to demo: message queues and streaming, idempotency.
 
-## Round 1: walking skeleton
+Round 1 (walking skeleton: Python SDK, HTTP ingest, writer, chatbot example) is done, merged in PR #6.
+Its brief is in git history.
 
-Branch: `a/round-1-skeleton`
+## Round 2: second SDK, second transport, rate limits
 
-Get a trace from a Python program into ClickHouse.
+Branch: `a/round-2`
 
 ### Build
 
-1. **Python SDK** (`sdk/python`, package `tracewell`, managed with `uv`)
-   - API: a context manager for traces and nested spans, plus a way to record a generation
-     (provider, model, prompt, completion, params, token usage, cost). Also an `@observe` decorator that
-     wraps a function in a span. Pick the exact names, then document them in `sdk/python/README.md`.
-   - Config from `TRACEWELL_HOST` and `TRACEWELL_API_KEY`, overridable in the constructor.
-   - Background thread: buffer finished traces, flush every 1s or every 100 traces, whichever comes
-     first. `flush()` and `atexit` flush so a short script loses nothing.
-   - Each process picks a random `sdk_instance_id`. `batch_seq` starts at 1. `idempotency_key` =
-     `"<sdk_instance_id>:<batch_seq>"`. A retry resends the same batch with the same seq.
-   - Retry policy and status-code handling exactly as in `docs/contracts/http.md`.
-   - Send protojson by building dicts. The SDK doesn't depend on the generated protobuf package.
-   - Never raise into the user's code because Tracewell is down. Log a warning instead.
-   - Tests: batching thresholds, seq increments once per batch (not per retry), retry/backoff on
-     5xx, no retry on 400/401.
+1. **TS SDK** (`sdk/ts`, npm package `@tracewell/sdk`, TypeScript strict)
+   - Same behavior as the Python SDK: traces and nested spans, generation recording, a wrapper that
+     turns a function into a span, background flush every 1s or 100 traces, `flush()` on exit.
+   - Same wire rules: random `sdkInstanceId` per process, `batchSeq` from 1, the same idempotency key
+     on a retry, the retry table in `docs/contracts/http.md`, including `429` with `Retry-After`.
+   - Transport: HTTP protojson by default. gRPC (`@grpc/grpc-js`) as an option. Both go through the
+     gateway at `TRACEWELL_HOST`.
+   - Works in Node 20+. Browser support isn't needed.
+   - Never throws into user code because Tracewell is down.
+   - Tests (vitest): batching thresholds, seq once per batch, retry/backoff, no retry on 400/401,
+     honoring `Retry-After`.
+   - `examples/chatbot.ts`: the TS twin of `chatbot.py`, with the same `--fake`, `--error` and
+     `--count` flags.
 
-2. **ingest-svc** (`services/ingest`, Go)
-   - `POST /v1/ingest` per `docs/contracts/http.md`: auth via Postgres `api_keys`, accept JSON or binary
-     protobuf, overwrite `project_id` from the key, reject a missing `idempotency_key`.
-   - Produce the `IngestBatch` as binary protobuf to `traces.raw`, keyed by `project_id`, `acks=all`,
-     idempotent producer. Respond `202` only after the broker acks.
-   - Cache API key lookups in memory for 60s so Postgres isn't hit on every request.
-   - Kafka client: `franz-go` (recommended) or `confluent-kafka-go`. Pick one and use it in the writer too.
-   - Tests: auth (good key, bad key, revoked key), `project_id` overwrite, bad body -> 400.
+2. **gRPC ingest** (`services/ingest`)
+   - Serve `tracewell.v1.IngestService/Ingest` on `INGEST_GRPC_ADDR`, from the generated code in
+     `proto/gen/go`. Share the auth, validation and Kafka write with the HTTP handler. Don't copy them.
+   - Status mapping exactly as in `docs/contracts/http.md`.
+   - SIGTERM: `GracefulStop` the gRPC server alongside the HTTP server, then flush the producer.
+   - Tests: the same auth and validation cases as HTTP, over an in-process gRPC connection (`bufconn`).
 
-3. **writer-svc** (`services/writer`, Go)
-   - Consumer group `writer`, subscribed to `traces.raw` and `evals.results`.
-   - For each `IngestBatch`: insert `spans`, then `traces` (computing `status`, `span_count`,
-     `total_tokens`, `cost_usd` from the spans), then one `ingest_batches` row. Map enums by dropping the
-     proto prefix. Batch inserts across messages, flushing every 500 rows or 1s.
-   - For each `EvalResult`: insert into `evals`.
-   - Commit offsets only after the ClickHouse insert succeeds. On failure retry 3 times, then send a
-     `DeadLetter` to `traces.dlq` and commit.
-   - Redelivered messages are fine because the tables are `ReplacingMergeTree`. Don't add a separate
-     dedupe store.
-   - Tests: enum mapping, rollup math, DLQ after 3 failures (with a fake inserter).
+3. **Per-project rate limit** (`services/ingest`)
+   - Redis fixed-window counter as specified in `docs/contracts/http.md` (Rate limit) and the Redis key
+     table in `docs/contracts/README.md`. Client: `go-redis/v9`.
+   - Fail open when Redis is down, and count it.
+   - Python SDK: confirm it already honors `Retry-After` on `429`. Fix it if not.
+   - Tests: under the limit passes, over it gets 429 with `Retry-After: 1`, Redis down passes.
 
-4. **Example** (`examples/chatbot.py`)
-   - Uses the SDK to record a short chat turn with one generation span inside a parent span.
-   - Calls OpenAI or Anthropic if a key is set, otherwise uses a `--fake` mode with canned output
-     and realistic token counts, so the integration run needs no API keys.
-   - `--error` flag marks the generation span as failed. The alerter test in `docs/INTEGRATION.md`
-     uses it.
-   - `--count N` sends N traces.
+4. **Metrics**: the ingest and writer metrics listed in `docs/contracts/README.md`.
 
 ### Contracts used
-`proto/trace.proto` (IngestBatch, EvalResult, DeadLetter), `docs/contracts/http.md` (ingest),
-`docs/contracts/clickhouse.sql` (writer tables), `docs/contracts/postgres.sql` (api_keys),
-`docs/contracts/README.md` (Kafka, env vars, Dockerfile layout).
+`proto/trace.proto` (`IngestService`), `docs/contracts/http.md` (rate limit, gRPC, SDK retry table),
+`docs/contracts/README.md` (env vars, Redis keys, gateway routes, metrics).
 
 ### Done when
-- `go test ./...` passes in both services and `uv run pytest` passes in `sdk/python`.
-- With `docker compose up -d` and both services running locally,
-  `uv run python examples/chatbot.py --fake --count 5` returns without errors, and
-  `SELECT count() FROM tracewell.traces FINAL` shows 5 new rows with correct `cost_usd`.
-- Killing the writer mid-run and restarting it doesn't lose or double-count traces (`FINAL` count
-  matches what was sent).
-- Dockerfiles for both services build from the repo root.
-- `docs/services/ingest.md`, `docs/services/writer.md` and `sdk/python/README.md` are written.
+- `go test ./...` passes in both services, `uv run pytest` in `sdk/python`, `npm test` and
+  `npm run lint` in `sdk/ts`.
+- Through the gateway (`TRACEWELL_HOST=http://localhost:8080`), `chatbot.ts --fake --count 5` adds 5
+  rows to `tracewell.traces`, once over HTTP and once over gRPC.
+- A loop that sends 500 requests in one second gets some `429`s, and the SDK retries them until every
+  trace lands. `SELECT count() FROM tracewell.traces FINAL` matches what was sent.
+- `docs/services/ingest.md` and `sdk/ts/README.md` are updated or written.
 
-### Deferred to later rounds
-TS SDK, gRPC ingest on 9091, Redis rate limiting (round 2). DLQ replay CLI (round 3). Writer gap
-tracking for the completeness page (round 4).
+### Deferred
+DLQ replay CLI and retry hardening (round 3). Writer gap tracking for the completeness page
+(round 4).

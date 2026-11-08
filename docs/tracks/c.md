@@ -3,59 +3,62 @@
 Folders: `workers/evals/`, `services/alerter/`
 DS concepts to demo: consumer groups, stream processing.
 
-## Round 1: walking skeleton
+Round 1 (eval worker with latency and empty-completion scorers, error-rate alerter) is done, merged in
+PR #7. Its brief is in git history.
 
-Branch: `c/round-1-skeleton`
+## Round 2: real evaluators, full alerter
 
-Score every generation span asynchronously, and fire one alert rule.
+Branch: `c/round-2`
+
+### Round 1 debt first
+- `workers/evals` `/readyz` hangs instead of answering. Fix it so it returns 200/503 within 2s.
+- Add `ruff` as a dev dependency and fix the lint findings, so Track B can make the CI step blocking.
 
 ### Build
 
-1. **Eval worker** (`workers/evals`, Python, `uv`)
-   - Depend on the generated protobuf package: `uv add --editable ../../proto/gen/python`.
-   - Kafka consumer group `evals` on `traces.raw` (`confluent-kafka`), manual commit. Decode each message
-     as `IngestBatch`.
-   - Run every evaluator on every `GENERATION` span and produce one `EvalResult` per (span, evaluator)
-     to `evals.results`, keyed by `project_id`. Flush the producer, then commit the offset.
-   - Round 1 evaluators. Put them behind a small interface, since round 2 adds LLM-as-judge,
-     toxicity and PII:
-     - `latency`: score 1.0 with label `ok` if the span took under 5000 ms, else score 0.0 and label `slow`.
-       `reasoning` says the duration.
-     - `empty_completion`: score 0.0 and label `empty` if the completion is blank, else score 1.0 and
-       label `ok`.
-   - 3 failed attempts on a message: send a `DeadLetter` to `traces.dlq`, then commit.
-   - `/healthz`, `/readyz`, `/metrics` on `:8085` (`prometheus_client`). Count messages processed and
-     evals produced. SIGTERM: finish the current message, flush, commit, exit.
-   - Tests: each evaluator, non-generation spans skipped, DLQ after 3 failures (fake producer).
+1. **New evaluators** (`workers/evals`). Names, score direction and labels are fixed in
+   `docs/contracts/README.md` (Evaluators).
+   - `llm_judge`: ask the judge model (Anthropic SDK, `EVALS_JUDGE_MODEL`) to rate whether the
+     completion answers the prompt helpfully and correctly. Ask for JSON `{score, reasoning}`.
+     Sampling, retries and "no key means off" follow the contract. Run judge calls concurrently
+     (a thread pool or asyncio) so one slow call doesn't stall the partition.
+   - `toxicity`: a local model (Detoxify or a small Hugging Face classifier). No API calls. Load it
+     once at startup.
+   - `pii`: regexes for email, phone, credit card (Luhn check) and US SSN. Presidio is optional.
+     Never put the matched text in `reasoning`.
+   - Tests: each evaluator on fixed inputs. Mock the judge client.
 
-2. **Alerter** (`services/alerter`, Go)
-   - Consumer group `alerter` on `traces.raw`.
-   - Load enabled rows from `alert_rules` at start and every 30s.
-   - Round 1 implements the `error_rate` metric: per project, the share of spans with `STATUS_ERROR`
-     over the rule's `window_seconds`. A tumbling window is fine for now. Sliding windows come in round 2.
-   - When the value is above `threshold` and the rule's `cooldown_seconds` have passed since it last
-     fired: insert into `alert_events`, then deliver. Round 1 delivery is `log` (an slog line with
-     `rule_id`, `project_id`, value) and `webhook` (POST JSON to `target`).
-   - Window state lives in memory. Restart behavior is a round 3 topic, so write down what happens on
-     restart in the service doc.
-   - Tests: window math, threshold plus cooldown, rule reload.
+2. **Alerter, full rules** (`services/alerter`). Semantics in `docs/contracts/http.md` (Alert rules).
+   - Add `cost_usd` and `p95_latency_ms` next to `error_rate`.
+   - Sliding windows: evaluate every 10s over the last `window_seconds`, not tumbling buckets. For
+     p95, keep the raw durations in the window (or a t-digest) so the result is a real p95.
+   - Minimum-sample guard (5) for `error_rate` and `p95_latency_ms`.
+   - Load rules `WHERE enabled AND deleted_at IS NULL`, still every 30s, so dashboard edits take effect.
+   - Slack delivery: POST `{"text": ...}` to the incoming-webhook URL in `target`. The message names
+     the rule, project, value, threshold and window, and links to
+     `http://localhost:3000/traces?from=...&to=...`.
+   - A failed delivery retries 3 times with backoff, is counted in `alerter_delivery_errors_total`,
+     and still writes the `alert_events` row.
+   - Tests: each metric's window math, min samples, cooldown, the deleted-rule filter, a Slack payload
+     against a fake server.
+
+3. **Metrics**: the evals and alerter metrics in `docs/contracts/README.md`.
 
 ### Contracts used
-`proto/trace.proto` (IngestBatch, EvalResult, DeadLetter), `docs/contracts/postgres.sql`
-(alert_rules, alert_events, and the seeded `error rate above 50%` rule), `docs/contracts/README.md`
-(Kafka, env vars, Dockerfile layout). The writer (Track A) stores your `EvalResult`s, and the dashboard
-(Track D) shows them. You don't touch ClickHouse.
+`docs/contracts/README.md` (evaluators, env vars, metrics), `docs/contracts/http.md` (alert-rule
+semantics), `docs/contracts/postgres_round2.sql` (`deleted_at`), `proto/trace.proto` (`EvalResult`).
 
 ### Done when
-- `uv run pytest` and `go test ./...` pass.
-- With infra up, ingest and writer running (or, until Track A lands, a small script of your own that
-  produces a hand-built `IngestBatch` to `traces.raw`), each generation span yields 2 `EvalResult`
-  messages on `evals.results`.
-- Sending a burst of failed spans makes the seeded rule fire once, write one `alert_events` row, and
-  not fire again inside the cooldown.
-- Dockerfiles for both build from the repo root.
-- `docs/services/evals.md` and `docs/services/alerter.md` are written.
+- `uv run pytest` and `uv run ruff check` pass in `workers/evals`. `go test ./...` passes in
+  `services/alerter`.
+- `chatbot.py --fake --count 5` produces `toxicity` and `pii` rows for all 5 traces, plus
+  `llm_judge` rows when a key is set.
+- A `cost_usd` rule with a low threshold fires one Slack message (a test webhook or a local echo
+  server works) and one `alert_events` row, then stays quiet through its cooldown.
+- Two eval worker containers share the 6 partitions (`kafka-consumer-groups --describe` shows the
+  split), and the eval count doesn't change.
+- `docs/services/evals.md` and `docs/services/alerter.md` are updated.
 
-### Deferred to later rounds
-LLM-as-judge, toxicity and PII scorers, sliding windows, `cost_usd` and `p95_latency_ms` metrics,
-Slack delivery (round 2). Scaling eval workers by partition under load, plus HPA (round 3).
+### Deferred
+Scaling eval workers by partition under load, plus HPA (round 3). Persisting alerter window state
+across restarts (round 3).

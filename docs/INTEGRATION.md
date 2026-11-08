@@ -23,6 +23,27 @@ Run everything from the repo root on an up-to-date `main`.
 
 Step 3 is the walking-skeleton milestone. Once it shows up in step 7, the skeleton is done.
 
+## Round 2: gateway, tenancy, cluster
+
+Run on `main` after all round 2 PRs merge. Steps 1-10 use compose. Steps 11-13 use kind. Everything
+goes through the gateway on 8080. Alongside `apps`, start `monitoring` for step 10.
+
+| # | Step | Expected | Owner if it fails |
+|---|---|---|---|
+| 1 | `docker compose --profile apps --profile monitoring up -d --build` | All healthy, including `gateway` and `web` | B (D for gateway/web health) |
+| 2 | `cd sdk/python && TRACEWELL_HOST=http://localhost:8080 TRACEWELL_API_KEY=tw_dev_localkey uv run python ../../examples/chatbot.py --fake --count 5` | Exits 0; 5 new traces | A (D if the gateway drops it) |
+| 3 | Same with `examples/chatbot.ts`, over HTTP and then gRPC | 5 more traces each time | A |
+| 4 | Send 5 traces with `tw_demo_otherkey` | Rows land with `project_id = 'proj_demo'` | A |
+| 5 | Log in at `localhost:3000` as `dev@tracewell.local` / `tracewell` | Sees `proj_dev` traces only. A `proj_demo` trace URL returns 404 | D |
+| 6 | Check `evals` grouped by evaluator | `toxicity` and `pii` for every generation span; `llm_judge` if a key is set | C |
+| 7 | Overview, sessions and trace pages | Charts have data, session timeline renders, new eval scores show | D |
+| 8 | Create a `cost_usd` rule (threshold 0) in `/alerts` with a webhook target, then repeat step 2 | Within ~40s: one delivery, one `alert_events` row, the event shows in `/alerts` | C (D if the rule didn't save) |
+| 9 | Burst 500 ingest requests in one second | Some `429`s; every trace still lands after SDK retries | A |
+| 10 | Grafana on `localhost:3300` | Dashboard shows ingest rate, lag, latency, cache hits | B |
+| 11 | `deploy/kind` setup script, then step 2 against the kind gateway | 5 traces in the Distributed table, visible in the dashboard | B |
+| 12 | `system.parts` on each shard and replica | Rows split across 2 shards. Both replicas of a shard match | B |
+| 13 | Delete one Kafka broker pod and one ClickHouse replica pod during step 2 with `--count 200` | Count matches 200, dashboard keeps serving | B |
+
 ## Assessment (copy this block per round)
 
 ```
@@ -41,3 +62,20 @@ Next round focus per track:
 
 Paste the filled-in block into Claude with "Write the round N+1 contracts and briefs from this." That
 updates `docs/contracts/`, `docs/tracks/*.md`, and adds the next round's table above.
+
+### Round 1 assessment (2026-11-06)
+Passed steps: none run end to end. The full compose stack (all 6 images plus Kafka and ClickHouse)
+took over 10 minutes to build and about 4 GB of RAM, which the laptop couldn't spare. The dashboard
+was checked on its own against a fake query-svc: trace list and detail both render correctly.
+Failed steps -> issue links: none logged, since nothing was run.
+Contract changes we needed (and whether they were merged): none during round 1.
+What took longer than expected: running the full stack locally. A repo inside an iCloud-synced
+folder (`~/Documents`) made `node_modules` and `git` hang until files were re-downloaded. Keep the
+repo outside iCloud.
+Carry-over into round 2: run the round 1 steps in CI (Track B's smoke test) instead of on laptops.
+web `/healthz` and a real 404 for unknown traces (D). evals `/readyz` hang and `ruff` debt (C).
+Next round focus per track:
+  A: TS SDK, gRPC ingest, Redis rate limit
+  B: kind, Strimzi x3, ClickHouse 2x2, Helm, Prometheus/Grafana, a lighter compose mode
+  C: llm_judge, toxicity, pii, sliding-window cost/p95 rules, Slack
+  D: gateway, login and tenancy, Redis cache, charts, sessions, alert CRUD, API keys
