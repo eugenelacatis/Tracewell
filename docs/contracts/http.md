@@ -120,6 +120,12 @@ Defined in `proto/trace.proto`. Same auth, same rules, same Kafka write as `POST
 - Status mapping: `400` -> `INVALID_ARGUMENT`, `401` -> `UNAUTHENTICATED`, `413` ->
   `RESOURCE_EXHAUSTED`, `429` -> `RESOURCE_EXHAUSTED` with a `retry-after` trailer of `1`,
   `5xx` -> `UNAVAILABLE`. The TS SDK can use either transport. The Python SDK stays on HTTP.
+- A client tells the two `RESOURCE_EXHAUSTED` cases apart by the trailer. With `retry-after`, it's
+  ingest's per-project rate limit: retry after that many seconds. Without it, the batch is too large: don't retry, split it
+  next time.
+- The gateway's per-IP limit keeps Envoy's default for gRPC calls (`UNAVAILABLE`, so don't set
+  `rate_limited_as_resource_exhausted`). Clients retry it like any `5xx`. A `RESOURCE_EXHAUSTED`
+  without the trailer would read as "too large" and the batch would be dropped.
 
 ## query-svc (port 8082)
 

@@ -26,6 +26,7 @@ cd proto && buf generate
 |---|---|---|
 | Go | `proto/gen/go` (module `github.com/eugenelacatis/tracewell/proto/tracewellv1`) | `require github.com/eugenelacatis/tracewell/proto/tracewellv1 v0.0.0` plus `replace github.com/eugenelacatis/tracewell/proto/tracewellv1 => ../../proto/gen/go` |
 | Python | `proto/gen/python` (package `tracewell-proto`, import `tracewell_proto.trace_pb2`) | `uv add --editable ../../proto/gen/python` |
+| TypeScript | `sdk/ts/src/gen/trace_pb.ts` (round 2) | Inside the TS SDK, its only user, so the npm package ships it. Needs `@bufbuild/protobuf` at the plugin's version (2.17.0) |
 
 The generated Go module needs Go 1.25 or newer (gRPC requires it), so every Go service uses `go 1.25`
 or later in its `go.mod` and a `golang:1.25`+ base image.
