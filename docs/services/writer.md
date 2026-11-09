@@ -10,7 +10,7 @@ Track A. Moves data from Kafka into ClickHouse. It consumes `traces.raw` (from i
 |---|---|
 | `GET /healthz` | `200 ok` while the process is up. |
 | `GET /readyz` | `200` when Kafka and ClickHouse both answer within 2s, else `503`. |
-| `GET /metrics` | Prometheus. `writer_rows_inserted_total{table}`, `writer_dead_letters_total`, `writer_flush_duration_seconds`, Go runtime metrics. |
+| `GET /metrics` | Prometheus. `writer_rows_inserted_total{table}`, `writer_insert_duration_seconds{table}`, `writer_dlq_total{reason}` (`decode` or `insert`), Go runtime metrics. |
 
 ## What it writes
 
@@ -39,24 +39,32 @@ from the last commit and the rows are inserted again. That's safe: every table i
 `ReplacingMergeTree`, so identical rows collapse, and readers use `FINAL`. There's no separate dedupe
 store. Kafka gives at-least-once delivery, and the table engine turns it into exactly-once at read time.
 
-**Retries and the DLQ.** A failed flush is retried after 0.5s and then 1s (3 attempts in total).
+**Retries and the DLQ.** A failed flush is retried after 2s and then 5s (3 attempts in total).
 If all three fail, every message in that flush is sent to `traces.dlq` as a `DeadLetter` (source
 topic, partition, offset, original payload, error, `attempts=3`) with its original key, and then
 committed. A message that doesn't decode, or has no `project_id`, goes to the DLQ right away with
 `attempts=1`, because retrying can't fix it. If producing to the DLQ fails, the writer exits without
 committing, so nothing is skipped. On restart it gets the messages again.
 
-Note: a ClickHouse outage longer than the ~1.5s retry window sends everything consumed during it to
-the DLQ instead of stalling. That follows the contract (3 attempts, then DLQ), but it means an outage
-needs a replay afterwards. The replay CLI is round 3.
+The ~7s retry window covers a ClickHouse restart (~3s measured in round 1, when a 1.5s window lost
+7 of 100 traces to the DLQ) and a replica pod being replaced on the cluster. While it retries, the
+writer stops consuming, so Kafka lag grows but nothing is lost. A longer outage still sends everything
+consumed during it to the DLQ, which follows the contract (3 attempts, then DLQ) but needs a replay
+afterwards. The replay CLI is round 3.
+
+**Cluster inserts.** The writer always sets `distributed_foreground_insert = 1`. On the 2x2 cluster
+the tables are `Distributed`, and without it an `INSERT` returns once the receiving node has queued the
+rows, before the shard has them, so a commit could run ahead of durability
+(`docs/contracts/clickhouse_cluster.sql`). On a single node the setting does nothing.
 
 **Rebalances.** The client holds off partition reassignment while uncommitted records are buffered
 (`BlockRebalanceOnPoll`), and allows it once the buffer is flushed and committed. That way one
 instance never commits offsets for a partition another instance has already taken over. A rebalance
-waits at most about one flush (~1s).
+waits at most about one flush: ~1s normally, up to ~8s while ClickHouse inserts are being retried.
 
 **Shutdown.** On SIGTERM the writer stops polling, flushes and commits what's buffered, then leaves
-the group, so another instance picks up the partitions immediately.
+the group, so another instance picks up the partitions immediately. If ClickHouse is failing at that
+moment, the retries add up to ~7s, inside Kubernetes' 30s grace period.
 
 **Crash restart.** After `kill -9` the dead instance stays in the group until its session times out
 (45s, the franz-go default), and its partitions aren't consumed during that time. Nothing is lost.
@@ -89,8 +97,8 @@ cd services/writer && go run ./cmd/writer
 End to end, with ingest-svc also running:
 
 ```
-cd sdk/python
-TRACEWELL_API_KEY=tw_dev_localkey uv run python ../../examples/chatbot.py --fake --count 5
+cd sdk/python   # 8081 is ingest-svc directly; leave TRACEWELL_HOST unset to go through the gateway on 8080
+TRACEWELL_HOST=http://localhost:8081 TRACEWELL_API_KEY=tw_dev_localkey uv run python ../../examples/chatbot.py --fake --count 5
 curl -s 'localhost:8123/?user=tracewell&password=tracewell' \
   --data "SELECT count(), sum(cost_usd) FROM tracewell.traces FINAL"
 ```
@@ -110,11 +118,12 @@ go test -tags integration ./internal/store/    # needs compose ClickHouse with t
 ```
 
 Unit tests: enum mapping, rollups (OK and ERROR traces, token and cost sums, zero-span traces),
-the `ingest_batches` row, buffering across messages and row counting, retry then success, DLQ
+the `ingest_batches` row, buffering across messages and row counting, retry (2s, 5s) then success, DLQ
 after 3 failures with the original payload/partition/offset/key, undecodable and project-less
 messages going straight to the DLQ while good ones are still inserted, and a DLQ failure returning
 an error so the caller doesn't commit. The integration test inserts every table twice and checks
 that `FINAL` shows one row each, with microsecond timestamps, `duration_ms`, tags and cost intact.
+`system.query_log` shows those inserts ran with `distributed_foreground_insert = 1`.
 
 Verified by hand (round 1): `kill -9` of the writer while the example sent 100 traces left 23
 stored; the restarted writer stored the remaining 77 after the session timeout. Result: 100 in

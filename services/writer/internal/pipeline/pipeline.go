@@ -28,14 +28,16 @@ var (
 		Name: "writer_rows_inserted_total",
 		Help: "Rows inserted into ClickHouse, by table. Redelivered messages count again.",
 	}, []string{"table"})
-	deadLetters = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "writer_dead_letters_total",
-		Help: "Messages sent to traces.dlq.",
-	})
-	flushDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name: "writer_flush_duration_seconds",
-		Help: "Time to insert one buffered batch, including retries.",
-	})
+	dlqTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "writer_dlq_total",
+		Help: "Messages sent to traces.dlq, by reason: decode (bad message) or insert (ClickHouse kept failing).",
+	}, []string{"reason"})
+)
+
+// DLQ reasons, the values of writer_dlq_total{reason}.
+const (
+	reasonDecode = "decode"
+	reasonInsert = "insert"
 )
 
 // Message is one Kafka record, copied out of the client's type.
@@ -76,8 +78,10 @@ type Writer struct {
 	rows int
 }
 
-// DefaultBackoff gives 3 attempts in total, per CLAUDE.md.
-var DefaultBackoff = []time.Duration{500 * time.Millisecond, time.Second}
+// DefaultBackoff gives 3 attempts in total, per CLAUDE.md, spread over ~7s. That rides out a
+// ClickHouse restart or a replica pod being replaced (~3s measured), which would otherwise send
+// healthy messages to the DLQ.
+var DefaultBackoff = []time.Duration{2 * time.Second, 5 * time.Second}
 
 // Add decodes m and buffers its rows.
 func (w *Writer) Add(m Message) {
@@ -110,15 +114,12 @@ func (w *Writer) Messages() int { return len(w.buf) }
 // either in ClickHouse or in traces.dlq, which is when the caller may commit the offsets. A non-nil
 // error means a DLQ produce failed; the caller must not commit, so Kafka redelivers the messages.
 func (w *Writer) Flush(ctx context.Context) error {
-	start := time.Now()
-	defer func() { flushDuration.Observe(time.Since(start).Seconds()) }()
-
 	var all rows.Rows
 	var good []pending
 	for _, p := range w.buf {
 		if p.err != nil {
 			// Decoding is deterministic, so retrying a message that didn't decode can't help.
-			if err := w.deadLetter(ctx, p.msg, p.err, 1); err != nil {
+			if err := w.deadLetter(ctx, p.msg, p.err, 1, reasonDecode); err != nil {
 				return err
 			}
 			continue
@@ -129,7 +130,7 @@ func (w *Writer) Flush(ctx context.Context) error {
 
 	if err := w.insertWithRetry(ctx, all); err != nil {
 		for _, p := range good {
-			if dlErr := w.deadLetter(ctx, p.msg, err, uint32(len(w.Backoff)+1)); dlErr != nil {
+			if dlErr := w.deadLetter(ctx, p.msg, err, uint32(len(w.Backoff)+1), reasonInsert); dlErr != nil {
 				return dlErr
 			}
 		}
@@ -166,7 +167,7 @@ func (w *Writer) insertWithRetry(ctx context.Context, r rows.Rows) error {
 	}
 }
 
-func (w *Writer) deadLetter(ctx context.Context, m Message, cause error, attempts uint32) error {
+func (w *Writer) deadLetter(ctx context.Context, m Message, cause error, attempts uint32, reason string) error {
 	dl := &tracewellv1.DeadLetter{
 		SourceTopic: m.Topic,
 		Partition:   m.Partition,
@@ -178,7 +179,7 @@ func (w *Writer) deadLetter(ctx context.Context, m Message, cause error, attempt
 	if err := w.DeadLetters.Send(ctx, m.Key, dl); err != nil {
 		return fmt.Errorf("send %s/%d@%d to dlq: %w", m.Topic, m.Partition, m.Offset, err)
 	}
-	deadLetters.Inc()
+	dlqTotal.WithLabelValues(reason).Inc()
 	w.Logger.Warn("sent message to dlq", "project_id", string(m.Key), "topic", m.Topic,
 		"partition", m.Partition, "offset", m.Offset, "attempts", attempts, "err", cause)
 	return nil
