@@ -10,3 +10,8 @@ plugins:
     out: gen/python/tracewell_proto
   - remote: buf.build/protocolbuffers/pyi:v28.3
     out: gen/python/tracewell_proto
+  # TS goes inside the SDK package, since the SDK is its only user and must ship it.
+  # Runtime: @bufbuild/protobuf at the same version as this plugin.
+  - remote: buf.build/bufbuild/es:v2.17.0
+    out: ../sdk/ts/src/gen
+    opt: target=ts
