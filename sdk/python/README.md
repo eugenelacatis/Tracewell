@@ -17,7 +17,7 @@ uv add --editable ../../sdk/python
 
 | Setting | Env var | Default |
 |---|---|---|
-| `host` | `TRACEWELL_HOST` | `http://localhost:8081` |
+| `host` | `TRACEWELL_HOST` | `http://localhost:8080` (the gateway; use `http://localhost:8081` to hit ingest-svc directly) |
 | `api_key` | `TRACEWELL_API_KEY` | none (requests get `401` and are dropped) |
 
 Constructor arguments win over env vars: `Tracewell(host="http://...", api_key="tw_...")`.
