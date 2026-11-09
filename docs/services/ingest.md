@@ -136,3 +136,7 @@ Verified by hand against compose with `INGEST_RATE_LIMIT_RPS=5`: 20 concurrent c
 accepted and 15 rate-limited, over both HTTP (`429`, `Retry-After: 1`) and gRPC (`RESOURCE_EXHAUSTED`,
 `retry-after: 1`). With Redis stopped, all 20 were accepted, `ingest_rate_limit_errors_total` rose by
 20 and `/readyz` stayed `200`. The limit came back as soon as Redis did. SIGTERM exited 0.
+
+Burst (integration step 9): `examples/burst.py --count 500` fires 500 requests at once from 500 SDK
+instances. At the default 200/s it got 400 `429`s, every SDK retried after `Retry-After`, and all 500
+traces were in `tracewell.traces` after 2.5s.
