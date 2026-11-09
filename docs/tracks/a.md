@@ -17,8 +17,8 @@ Branch: `a/round-2`
      turns a function into a span, background flush every 1s or 100 traces, `flush()` on exit.
    - Same wire rules: random `sdkInstanceId` per process, `batchSeq` from 1, the same idempotency key
      on a retry, the retry table in `docs/contracts/http.md`, including `429` with `Retry-After`.
-   - Transport: HTTP protojson by default. gRPC (`@grpc/grpc-js`) as an option. Both go through the
-     gateway at `TRACEWELL_HOST`.
+   - Transport: HTTP protojson by default. gRPC (`@grpc/grpc-js`) as an option, using the generated
+     code in `sdk/ts/src/gen`. Both go through the gateway at `TRACEWELL_HOST`.
    - Works in Node 20+. Browser support isn't needed.
    - Never throws into user code because Tracewell is down.
    - Tests (vitest): batching thresholds, seq once per batch, retry/backoff, no retry on 400/401,
@@ -41,6 +41,9 @@ Branch: `a/round-2`
    - Tests: under the limit passes, over it gets 429 with `Retry-After: 1`, Redis down passes.
 
 4. **Metrics**: the ingest and writer metrics listed in `docs/contracts/README.md`.
+
+5. **Point both SDKs at the gateway**: `TRACEWELL_HOST` defaults to `http://localhost:8080` in the
+   Python and TS SDKs, per `docs/contracts/README.md`.
 
 ### Contracts used
 `proto/trace.proto` (`IngestService`), `docs/contracts/http.md` (rate limit, gRPC, SDK retry table),
