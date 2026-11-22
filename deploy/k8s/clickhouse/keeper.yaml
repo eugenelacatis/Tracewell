@@ -21,7 +21,8 @@ spec:
         spec:
           containers:
             - name: clickhouse-keeper
-              image: clickhouse/clickhouse-keeper:24.8
+              # Not 24.8: Altinity operator 0.27 writes a Keeper setting (use_xid_64) that 24.8 rejects.
+              image: clickhouse/clickhouse-keeper:25.8
               resources:
                 requests: { cpu: 50m, memory: 128Mi }
                 limits: { memory: 256Mi }
