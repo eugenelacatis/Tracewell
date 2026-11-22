@@ -3,7 +3,7 @@
 # max.message.bytes is carried over from compose: the broker default (~1 MB) is below ingest's 5 MB body
 # limit. traces.raw allows 6 MiB (ingest's producer limit); traces.dlq allows 8 MiB because it wraps the
 # original payload.
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: traces-raw
@@ -16,7 +16,7 @@ spec:
     min.insync.replicas: 2
     max.message.bytes: 6291456
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: evals-results
@@ -28,7 +28,7 @@ spec:
   config:
     min.insync.replicas: 2
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: traces-dlq

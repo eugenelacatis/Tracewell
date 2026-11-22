@@ -1,7 +1,7 @@
 # Strimzi Kafka for kind: 3 nodes in KRaft mode, each both broker and controller (no ZooKeeper).
 # Apply into the `tracewell` namespace. Needs the Strimzi operator (deploy/kind/up.sh installs it).
 # Clients use tracewell-kafka-bootstrap:9092, which is what deploy/helm/tracewell/values.yaml points at.
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool
 metadata:
   name: dual-role
@@ -22,17 +22,13 @@ spec:
     -Xms: 256m
     -Xmx: 384m
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: Kafka
 metadata:
   name: tracewell
-  annotations:
-    strimzi.io/node-pools: enabled
-    strimzi.io/kraft: enabled
 spec:
   kafka:
-    version: 3.9.0
-    metadataVersion: 3.9-IV0
+    # No version pinned: Strimzi 1.x defaults to the newest Kafka it supports (4.x), KRaft only.
     listeners:
       - { name: plain, port: 9092, type: internal, tls: false }
     config:
