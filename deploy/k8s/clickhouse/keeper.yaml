@@ -1,0 +1,34 @@
+# ClickHouse Keeper (the ZooKeeper replacement ClickHouse uses for replication metadata): 3 nodes so
+# it keeps a majority when one pod is deleted. Needs the Altinity operator (deploy/kind/up.sh).
+# The operator creates a Service named keeper-tracewell-keeper on 2181, which clickhouse.yaml points at.
+apiVersion: clickhouse-keeper.altinity.com/v1
+kind: ClickHouseKeeperInstallation
+metadata:
+  name: tracewell-keeper
+spec:
+  configuration:
+    clusters:
+      - name: keeper
+        layout:
+          replicasCount: 3
+  defaults:
+    templates:
+      podTemplate: keeper
+      dataVolumeClaimTemplate: data
+  templates:
+    podTemplates:
+      - name: keeper
+        spec:
+          containers:
+            - name: clickhouse-keeper
+              image: clickhouse/clickhouse-keeper:24.8
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 256Mi }
+    volumeClaimTemplates:
+      - name: data
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 1Gi
