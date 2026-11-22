@@ -263,6 +263,42 @@ services:
       interval: 5s
       retries: 12
 
+  # ---- Monitoring ---------------------------------------------------------------------------------
+  # Off by default. Run alongside the apps with:
+  #   docker compose --profile apps --profile monitoring up -d
+  # Grafana: http://localhost:3300 (admin / tracewell). Prometheus: http://localhost:9090.
+  # The same prometheus.yml and dashboard JSON are used on kind (deploy/monitoring/).
+
+  # Reads consumer-group offsets from Kafka and exposes kafka_consumergroup_lag.
+  kafka-exporter:
+    profiles: [monitoring]
+    image: danielqsj/kafka-exporter:v1.8.0
+    command: ["--kafka.server=kafka:29092"]
+    depends_on:
+      kafka: { condition: service_healthy }
+
+  prometheus:
+    profiles: [monitoring]
+    image: prom/prometheus:v2.54.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    profiles: [monitoring]
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3300:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: tracewell
+    volumes:
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/monitoring/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
 volumes:
   clickhouse-data:
   postgres-data:
