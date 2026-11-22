@@ -125,7 +125,7 @@
       "id": 3,
       "type": "timeseries",
       "title": "Consumer lag per group",
-      "description": "Messages not yet processed, per consumer group (writer, evals, alerter).",
+      "description": "Messages not yet processed, per consumer group (writer, evals, alerter). Partitions a group has never committed to report -1 from the exporter, so they are clamped to 0.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -162,7 +162,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (consumergroup) (kafka_consumergroup_lag)",
+          "expr": "sum by (consumergroup) (clamp_min(kafka_consumergroup_lag, 0))",
           "legendFormat": "{{consumergroup}}"
         }
       ]
