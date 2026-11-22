@@ -94,6 +94,26 @@ services:
       interval: 5s
       retries: 20
 
+  # One-shot job: applies every Postgres migration on each `up`, so existing volumes pick up new files
+  # (the initdb mount above only runs on an empty volume). Every file is idempotent, so re-running is harmless.
+  migrate:
+    image: postgres:16
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+    environment:
+      PGPASSWORD: tracewell
+    volumes:
+      - ./deploy/migrations/postgres:/migrations:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for f in /migrations/*.sql; do
+          echo "applying $$f"
+          psql -h postgres -U tracewell -d tracewell -v ON_ERROR_STOP=1 -q -f "$$f"
+        done
+
   redis:
     image: redis:7
     ports:
@@ -121,6 +141,7 @@ services:
       INGEST_KAFKA_BROKERS: kafka:29092
       INGEST_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
     depends_on:
+      migrate: { condition: service_completed_successfully }
       kafka-init: { condition: service_completed_successfully }
       postgres: { condition: service_healthy }
     healthcheck:
@@ -155,6 +176,7 @@ services:
       QUERY_CLICKHOUSE_DSN: clickhouse://tracewell:tracewell@clickhouse:9000/tracewell
       QUERY_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
     depends_on:
+      migrate: { condition: service_completed_successfully }
       clickhouse: { condition: service_healthy }
       postgres: { condition: service_healthy }
     healthcheck:
@@ -172,6 +194,7 @@ services:
       ALERTER_KAFKA_BROKERS: kafka:29092
       ALERTER_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
     depends_on:
+      migrate: { condition: service_completed_successfully }
       kafka-init: { condition: service_completed_successfully }
       postgres: { condition: service_healthy }
     healthcheck:
