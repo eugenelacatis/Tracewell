@@ -1,8 +1,9 @@
 # alerter
 
 Track C. Stream processing alerting service written in Go. Consumes raw trace batches from Kafka,
-evaluates windowed aggregation rules against stream metrics, tracks cooldown suppression, logs alerts or
-dispatches webhooks, and records fired alerts into Postgres for display in the dashboard.
+evaluates windowed aggregation rules against stream metrics, tracks cooldown suppression, delivers
+alerts via logs, webhooks, or Slack with trace links, and records fired alerts into Postgres for display
+in the dashboard.
 
 ## Endpoints
 
@@ -12,37 +13,60 @@ Port 8083 (`ALERTER_HTTP_ADDR`).
 |---|---|
 | `GET /healthz` | `200 ok` while the process is running. |
 | `GET /readyz` | `200 ready` when both Postgres and Kafka are reachable, else `503`. |
-| `GET /metrics` | Prometheus metrics (`alerter_spans_processed_total`, `alerter_error_spans_total`, `alerter_alerts_fired_total`, `alerter_rules_active`). |
+| `GET /metrics` | Prometheus metrics (`alerter_rules_loaded`, `alerter_alerts_fired_total{metric, channel}`, `alerter_delivery_errors_total{channel}`). |
 
-## Rules and Metrics (Round 1)
+## Rules and Metrics (Round 2)
 
-In Round 1, the alerter supports the **`error_rate`** metric:
-- **Definition**: Per project, the ratio of spans with `STATUS_ERROR` divided by total spans observed over
-  the rule's configured `window_seconds`.
-- **Condition**: Triggers when `error_rate > threshold`.
-- **Cooldown**: Once triggered, a rule enters a cooldown period (`cooldown_seconds`). Subsequent threshold
-  violations within this period are suppressed to prevent alert flooding.
-- **Delivery**:
-  - `log`: An `slog` JSON line containing `rule_id`, `rule_name`, `project_id`, `metric`, `value`, and `threshold`.
-  - `webhook`: HTTP POST JSON payload to `target` URL with timeout (5s).
-- **Audit event**: Every fired alert is durably inserted into `alert_events` in Postgres.
+The alerter supports three project-scoped metrics evaluated over a sliding window:
 
-Rules are loaded at startup and reloaded every 30 seconds from `alert_rules` (`WHERE enabled = true`).
+| Metric | Calculation | Threshold condition | Minimum sample guard |
+|---|---|---|---|
+| `error_rate` | ERROR spans / all spans (0.0 - 1.0) | `value > threshold` | Requires at least 5 spans in the window |
+| `cost_usd` | Sum of generation `costUsd` | `value > threshold` | No sample guard (fires immediately) |
+| `p95_latency_ms` | 95th percentile of trace duration (ms) | `value > threshold` | Requires at least 5 traces in the window |
 
-## Window State & Restart Behavior
+### Sliding Windows
+- Rules are evaluated every 10 seconds over the last `windowSeconds` (not tumbling buckets).
+- In-memory window tracker stores raw trace durations to compute exact nearest-rank p95 percentiles.
+- Windows older than 1 hour are automatically pruned to prevent memory growth.
 
-Window aggregations are tracked in-memory using an efficient time-window tracker that aggregates span records
-per `project_id` and prunes data older than 15 minutes.
+### Cooldown
+- Once triggered, a rule enters a cooldown period (`cooldown_seconds`). Subsequent threshold violations
+  within this period are suppressed to prevent alert flooding.
+- Cooldown timer starts only after the alert event has been durably persisted in Postgres.
 
-### Restart behavior (Round 1 / Round 2)
-Because window state and cooldown records live in memory:
-- **On restart**, in-memory window counters (`total` spans and `error` spans) and the `lastFired` timestamps
-  reset.
-- When new spans arrive after restart, window counts begin accumulating from zero.
-- If a project experiences sustained errors across a restart, the rule will evaluate against the new post-restart
-  spans and may fire once (starting a new cooldown period).
-- In Round 3, persistent window state checkpoints (or state recovery from compacted Kafka topics / Redis) will
-  be investigated to maintain cross-restart continuity.
+### Rule Synchronization & Soft Deletes
+- Rules are refreshed from Postgres every 30 seconds.
+- Filter query: `SELECT ... FROM alert_rules WHERE enabled = true AND deleted_at IS NULL`.
+- Soft-deleted or disabled rules are omitted from in-memory evaluation and their cooldown state is cleaned up.
+
+## Delivery Channels
+
+1. **`log`**:
+   - Structured JSON log containing rule ID, name, project ID, metric, value, and threshold.
+
+2. **`webhook`**:
+   - HTTP POST JSON payload to `rule.Target` with fields: `rule_id`, `rule_name`, `project_id`, `metric`, `value`, `threshold`, `message`, `fired_at`.
+
+3. **`slack`**:
+   - HTTP POST JSON payload `{"text": ...}` to incoming Slack webhook URL (`rule.Target`).
+   - The message names the rule, project ID, current value, threshold, and window, and includes a direct link to the trace view:
+     `http://localhost:3000/traces?from=<RFC3339>&to=<RFC3339>`
+
+### Retries & Durability
+- HTTP deliveries (`webhook`, `slack`) retry up to 3 times with exponential backoff (100ms, 200ms, 400ms).
+- If all attempts fail, `alerter_delivery_errors_total{channel}` is incremented.
+- **Audit persistence guarantee**: The alert is durably recorded in the Postgres `alert_events` table **before** delivery is attempted, ensuring alert history is preserved even if the delivery channel is temporarily down.
+
+## Prometheus Metrics
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `alerter_rules_loaded` | Gauge | None | Number of active enabled rules loaded in memory |
+| `alerter_alerts_fired_total` | Counter | `metric`, `channel` | Total number of alert rules triggered |
+| `alerter_delivery_errors_total` | Counter | `channel` | Total count of alert delivery errors |
+| `alerter_spans_processed_total` | Counter | None | Total spans processed by the alerter |
+| `alerter_error_spans_total` | Counter | None | Total error spans observed |
 
 ## Env vars
 
@@ -54,36 +78,11 @@ Because window state and cooldown records live in memory:
 | `ALERTER_TOPIC` | `traces.raw` | Topic containing raw trace batches |
 | `ALERTER_POSTGRES_DSN` | `postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable` | Postgres DSN for rules and events |
 
-## Run locally
-
-```bash
-# Ensure Postgres and Kafka are running
-docker compose up -d postgres kafka
-
-# Run alerter pointing to localhost ports
-cd services/alerter
-ALERTER_KAFKA_BROKERS=localhost:9092 \
-ALERTER_POSTGRES_DSN="postgres://tracewell:tracewell@localhost:5432/tracewell?sslmode=disable" \
-go run ./cmd/alerter
-```
-
-Docker build from repo root:
-
-```bash
-docker build -f services/alerter/Dockerfile -t tracewell/alerter .
-```
-
-## Test
+## Development & Verification
 
 ```bash
 cd services/alerter
+
+# Run unit tests
 go test -v ./...
 ```
-
-Unit tests cover:
-- **Window math**: Exact span error rate computation, window boundary exclusion, and old span pruning.
-- **Threshold and cooldown**: Alert firing on threshold crossing, cooldown suppression during cooldown interval,
-  and re-firing after cooldown expiration.
-- **Rule reload**: Dynamic synchronization of active rules from Postgres, omitting disabled rules and removing deleted rules.
-- **Delivery**: Delivery to `log` and `webhook` (tested via in-memory mock transport).
-- **Health/Readiness**: Correct HTTP status codes on `/healthz` and `/readyz`.
