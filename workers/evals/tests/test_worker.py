@@ -1,10 +1,12 @@
 """Unit tests for eval worker Kafka processing, span filtering, and DLQ routing."""
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from google.protobuf.timestamp_pb2 import Timestamp
 from tracewell_proto import trace_pb2
 
+from tracewell_evals.evaluators import EmptyCompletionEvaluator, LatencyEvaluator
 from tracewell_evals.worker import EvalWorker, KafkaMessage
 
 
@@ -14,8 +16,8 @@ class FakeMessage:
         topic: str = "traces.raw",
         partition: int = 0,
         offset: int = 10,
-        key: Optional[bytes] = b"proj_test",
-        value: Optional[bytes] = b"",
+        key: bytes | None = b"proj_test",
+        value: bytes | None = b"",
         error: Any = None,
     ) -> None:
         self._topic = topic
@@ -34,10 +36,10 @@ class FakeMessage:
     def offset(self) -> int:
         return self._offset
 
-    def key(self) -> Optional[bytes]:
+    def key(self) -> bytes | None:
         return self._key
 
-    def value(self) -> Optional[bytes]:
+    def value(self) -> bytes | None:
         return self._value
 
     def error(self) -> Any:
@@ -46,15 +48,15 @@ class FakeMessage:
 
 class FakeProducer:
     def __init__(self) -> None:
-        self.messages: list[tuple[str, Optional[bytes], bytes]] = []
+        self.messages: list[tuple[str, bytes | None, bytes]] = []
         self.flushed = False
 
     def produce(
         self,
         topic: str,
         value: bytes,
-        key: Optional[bytes] = None,
-        callback: Optional[Callable[..., Any]] = None,
+        key: bytes | None = None,
+        callback: Callable[..., Any] | None = None,
     ) -> None:
         self.messages.append((topic, key, value))
 
@@ -64,17 +66,17 @@ class FakeProducer:
 
 
 class FakeConsumer:
-    def __init__(self, messages: Optional[list[KafkaMessage]] = None) -> None:
+    def __init__(self, messages: list[KafkaMessage] | None = None) -> None:
         self.messages = list(messages or [])
         self.committed_messages: list[KafkaMessage] = []
         self.closed = False
 
-    def poll(self, timeout: float = 1.0) -> Optional[KafkaMessage]:
+    def poll(self, timeout: float = 1.0) -> KafkaMessage | None:
         if self.messages:
             return self.messages.pop(0)
         return None
 
-    def commit(self, message: Optional[KafkaMessage] = None, asynchronous: bool = False) -> None:
+    def commit(self, message: KafkaMessage | None = None, asynchronous: bool = False) -> None:
         if message:
             self.committed_messages.append(message)
 
@@ -84,7 +86,7 @@ class FakeConsumer:
 
 def make_ingest_batch(
     project_id: str = "proj_test",
-    spans: Optional[list[trace_pb2.Span]] = None,
+    spans: list[trace_pb2.Span] | None = None,
 ) -> trace_pb2.IngestBatch:
     if spans is None:
         start_time = Timestamp()
@@ -121,10 +123,12 @@ def make_ingest_batch(
     )
 
 
-def test_generation_span_produces_two_evals() -> None:
+def test_generation_span_produces_configured_evals() -> None:
     producer = FakeProducer()
     consumer = FakeConsumer()
-    worker = EvalWorker(consumer=consumer, producer=producer)
+    # Configure specific evaluators to verify precise output
+    evaluators = [LatencyEvaluator(), EmptyCompletionEvaluator()]
+    worker = EvalWorker(consumer=consumer, producer=producer, evaluators=evaluators)
 
     batch = make_ingest_batch(project_id="proj_alpha")
     msg = FakeMessage(value=batch.SerializeToString(), key=b"proj_alpha")
@@ -211,4 +215,3 @@ def test_dlq_after_three_failures() -> None:
     assert dl.payload == b"this is definitely not a protobuf"
     assert dl.attempts == 3
     assert len(dl.error) > 0
-

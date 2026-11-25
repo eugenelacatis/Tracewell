@@ -4,11 +4,13 @@ import json
 import logging
 import os
 import signal
+import socket
 import sys
 from typing import Any
 
 from confluent_kafka import Consumer, Producer
 
+from tracewell_evals.evaluators import get_default_evaluators
 from tracewell_evals.server import HealthServer
 from tracewell_evals.worker import EvalWorker
 
@@ -36,6 +38,22 @@ def setup_logging() -> None:
     root.handlers = [handler]
 
 
+def check_kafka_ready(brokers_str: str, timeout: float = 1.0) -> bool:
+    """Quickly check if at least one Kafka broker is reachable without hanging."""
+    for broker in brokers_str.split(","):
+        broker = broker.strip()
+        if not broker:
+            continue
+        host, _, port_str = broker.partition(":")
+        port = int(port_str) if port_str else 9092
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def main() -> None:
     setup_logging()
     logger = logging.getLogger("evals.main")
@@ -47,12 +65,20 @@ def main() -> None:
     results_topic = os.getenv("EVALS_RESULTS_TOPIC", "evals.results")
     dlq_topic = os.getenv("EVALS_DLQ_TOPIC", "traces.dlq")
 
+    anthropic_key = os.getenv("EVALS_ANTHROPIC_API_KEY", "")
+    judge_model = os.getenv("EVALS_JUDGE_MODEL", "claude-haiku-5-5")
+    try:
+        judge_sample_rate = float(os.getenv("EVALS_JUDGE_SAMPLE_RATE", "1.0"))
+    except ValueError:
+        judge_sample_rate = 1.0
+
     logger.info(
-        "Starting eval worker (brokers=%s, group=%s, topic=%s, addr=%s)",
+        "Starting eval worker (brokers=%s, group=%s, topic=%s, addr=%s, judge_model=%s)",
         kafka_brokers,
         group_id,
         raw_topic,
         http_addr,
+        judge_model if anthropic_key else "off",
     )
 
     # Kafka consumer configuration with manual commits
@@ -73,19 +99,23 @@ def main() -> None:
     }
     producer = Producer(producer_conf)
 
+    # Reliable, non-hanging ready check using socket connect with 1.0s timeout
     def kafka_ready_check() -> bool:
-        try:
-            metadata = consumer.list_topics(timeout=2.0)
-            return metadata is not None and metadata.brokers is not None and len(metadata.brokers) > 0
-        except Exception:
-            return False
+        return check_kafka_ready(kafka_brokers, timeout=1.0)
 
     health_server = HealthServer(addr=http_addr, ready_check=kafka_ready_check)
     health_server.start()
 
+    evaluators = get_default_evaluators(
+        anthropic_api_key=anthropic_key,
+        judge_model=judge_model,
+        judge_sample_rate=judge_sample_rate,
+    )
+
     worker = EvalWorker(
         consumer=consumer,
         producer=producer,
+        evaluators=evaluators,
         raw_topic=raw_topic,
         results_topic=results_topic,
         dlq_topic=dlq_topic,
@@ -110,4 +140,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

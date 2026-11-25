@@ -1,7 +1,32 @@
 """Prometheus metrics for eval worker."""
 
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
+# Round 2 contract metrics
+EVALS_SCORED_TOTAL = Counter(
+    "evals_scored_total",
+    "Total number of spans scored by evaluator",
+    ["evaluator"],
+)
+
+EVALS_DURATION_SECONDS = Histogram(
+    "evals_duration_seconds",
+    "Duration of evaluation per evaluator in seconds",
+    ["evaluator"],
+)
+
+EVALS_JUDGE_ERRORS_TOTAL = Counter(
+    "evals_judge_errors_total",
+    "Total number of judge errors encountered",
+)
+
+EVALS_DLQ_TOTAL = Counter(
+    "evals_dlq_total",
+    "Total number of messages sent to Dead Letter Queue by reason",
+    ["reason"],
+)
+
+# Operational & legacy metrics
 MESSAGES_PROCESSED = Counter(
     "evals_messages_processed_total",
     "Total number of Kafka messages processed by the eval worker",
@@ -27,4 +52,3 @@ IN_FLIGHT_MESSAGES = Gauge(
     "evals_in_flight",
     "Number of messages currently being processed",
 )
-
