@@ -2,6 +2,7 @@
 
 import io
 
+from tracewell_evals.main import check_kafka_ready
 from tracewell_evals.server import HealthHandler
 
 
@@ -21,7 +22,7 @@ def call_handler(path: str, ready_fn: object = None) -> tuple[int, bytes, dict[s
         {"ready_check": staticmethod(ready_fn if ready_fn is not None else (lambda: True))},
     )
 
-    request_bytes = f"GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode("utf-8")
+    request_bytes = f"GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode()
     rfile = io.BytesIO(request_bytes)
     wfile = io.BytesIO()
 
@@ -82,9 +83,15 @@ def test_metrics_endpoint() -> None:
     content = body.decode("utf-8")
     assert "evals_messages_processed_total" in content
     assert "evals_produced_total" in content
-    assert "evals_dead_letters_total" in content
+    assert "evals_scored_total" in content
 
 
 def test_not_found_endpoint() -> None:
     code, body, _ = call_handler("/unknown")
     assert code == 404
+
+
+def test_check_kafka_ready_unreachable() -> None:
+    # 127.0.0.1 on a closed port should return False within 1s without hanging
+    result = check_kafka_ready("127.0.0.1:59999", timeout=0.1)
+    assert result is False

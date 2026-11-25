@@ -34,12 +34,12 @@ func NewPgStore(ctx context.Context, dsn string) (*PgStore, error) {
 	return &PgStore{pool: pool}, nil
 }
 
-// LoadEnabledRules fetches all enabled alert rules from postgres alert_rules.
+// LoadEnabledRules fetches all enabled, non-deleted alert rules from postgres alert_rules.
 func (s *PgStore) LoadEnabledRules(ctx context.Context) ([]model.AlertRule, error) {
 	query := `
-		SELECT id, project_id, name, metric, threshold, window_seconds, cooldown_seconds, channel, target, enabled, created_at, updated_at
+		SELECT id, project_id, name, metric, threshold, window_seconds, cooldown_seconds, channel, target, enabled, created_at, updated_at, deleted_at
 		FROM alert_rules
-		WHERE enabled = true
+		WHERE enabled = true AND deleted_at IS NULL
 	`
 	rows, err := s.pool.Query(ctx, query)
 	if err != nil {
@@ -63,6 +63,7 @@ func (s *PgStore) LoadEnabledRules(ctx context.Context) ([]model.AlertRule, erro
 			&r.Enabled,
 			&r.CreatedAt,
 			&r.UpdatedAt,
+			&r.DeletedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan alert rule: %w", err)
 		}
@@ -106,4 +107,3 @@ func (s *PgStore) Ping(ctx context.Context) error {
 func (s *PgStore) Close() {
 	s.pool.Close()
 }
-

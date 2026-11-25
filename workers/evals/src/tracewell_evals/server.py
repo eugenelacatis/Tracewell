@@ -3,7 +3,7 @@
 import http.server
 import logging
 import threading
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
@@ -46,7 +46,12 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         # Suppress verbose HTTP access logs in production
-        logger.debug("%s - - [%s] %s", self.address_string(), self.log_date_time_string(), format % args)
+        logger.debug(
+            "%s - - [%s] %s",
+            self.address_string(),
+            self.log_date_time_string(),
+            format % args,
+        )
 
 
 class HealthServer:
@@ -55,15 +60,15 @@ class HealthServer:
     def __init__(
         self,
         addr: str = ":8085",
-        ready_check: Optional[Callable[[], bool]] = None,
+        ready_check: Callable[[], bool] | None = None,
     ) -> None:
         host, port_str = addr.rsplit(":", 1) if ":" in addr else ("", addr)
         port = int(port_str) if port_str else 8085
         self.host = host
         self.port = port
         self.ready_check = ready_check if ready_check is not None else (lambda: True)
-        self._server: Optional[http.server.ThreadingHTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
+        self._server: http.server.ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         """Start the HTTP server on a daemon thread."""
@@ -83,4 +88,3 @@ class HealthServer:
             self._server.shutdown()
             self._server.server_close()
             logger.info("Health server stopped")
-

@@ -5,6 +5,9 @@ from tracewell_evals.evaluators import (
     EmptyCompletionEvaluator,
     EvalOutput,
     LatencyEvaluator,
+    LLMJudgeEvaluator,
+    PIIEvaluator,
+    ToxicityEvaluator,
     get_default_evaluators,
 )
 from tracewell_evals.main import main
@@ -15,7 +18,10 @@ __all__ = [
     "EmptyCompletionEvaluator",
     "EvalOutput",
     "EvalWorker",
+    "LLMJudgeEvaluator",
     "LatencyEvaluator",
+    "PIIEvaluator",
+    "ToxicityEvaluator",
     "get_default_evaluators",
     "main",
 ]

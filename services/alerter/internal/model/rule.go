@@ -4,18 +4,19 @@ import "time"
 
 // AlertRule represents a row from postgres alert_rules table.
 type AlertRule struct {
-	ID              int64     `json:"id"`
-	ProjectID       string    `json:"projectId"`
-	Name            string    `json:"name"`
-	Metric          string    `json:"metric"` // 'error_rate', 'cost_usd', 'p95_latency_ms'
-	Threshold       float64   `json:"threshold"`
-	WindowSeconds   int       `json:"windowSeconds"`
-	CooldownSeconds int       `json:"cooldownSeconds"`
-	Channel         string    `json:"channel"` // 'log', 'webhook', 'slack'
-	Target          string    `json:"target"`
-	Enabled         bool      `json:"enabled"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ID              int64      `json:"id"`
+	ProjectID       string     `json:"projectId"`
+	Name            string     `json:"name"`
+	Metric          string     `json:"metric"` // 'error_rate', 'cost_usd', 'p95_latency_ms'
+	Threshold       float64    `json:"threshold"`
+	WindowSeconds   int        `json:"windowSeconds"`
+	CooldownSeconds int        `json:"cooldownSeconds"`
+	Channel         string     `json:"channel"` // 'log', 'webhook', 'slack'
+	Target          string     `json:"target"`
+	Enabled         bool       `json:"enabled"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
+	DeletedAt       *time.Time `json:"deletedAt,omitempty"`
 }
 
 // AlertEvent represents a row written to postgres alert_events table when an alert fires.
@@ -40,3 +41,7 @@ type WebhookPayload struct {
 	FiredAt   time.Time `json:"fired_at"`
 }
 
+// SlackPayload is the JSON structure posted to Slack incoming webhooks.
+type SlackPayload struct {
+	Text string `json:"text"`
+}
