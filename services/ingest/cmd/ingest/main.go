@@ -1,14 +1,18 @@
-// ingest-svc accepts IngestBatches over HTTP (POST /v1/ingest), stamps the project_id from the API
-// key, and writes each batch to the Kafka topic traces.raw. A 202 means Kafka has the batch.
+// ingest-svc accepts IngestBatches over HTTP (POST /v1/ingest) and gRPC (IngestService/Ingest),
+// stamps the project_id from the API key, applies the per-project rate limit, and writes each batch to
+// the Kafka topic traces.raw. A 202 (or gRPC OK) means Kafka has the batch.
 package main
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +22,9 @@ import (
 
 	"github.com/eugenelacatis/tracewell/services/ingest/internal/api"
 	"github.com/eugenelacatis/tracewell/services/ingest/internal/auth"
+	"github.com/eugenelacatis/tracewell/services/ingest/internal/grpcapi"
+	"github.com/eugenelacatis/tracewell/services/ingest/internal/ingest"
+	"github.com/eugenelacatis/tracewell/services/ingest/internal/ratelimit"
 )
 
 const (
@@ -49,8 +56,14 @@ func (p kafkaProducer) Produce(ctx context.Context, key string, value []byte) er
 
 func run(logger *slog.Logger) error {
 	addr := env("INGEST_HTTP_ADDR", ":8081")
+	grpcAddr := env("INGEST_GRPC_ADDR", ":9091")
 	brokers := strings.Split(env("INGEST_KAFKA_BROKERS", "localhost:9092"), ",")
 	pgDSN := env("INGEST_POSTGRES_DSN", "postgres://tracewell:tracewell@localhost:5432/tracewell?sslmode=disable")
+	redisAddr := env("INGEST_REDIS_ADDR", "localhost:6379")
+	rps, err := strconv.ParseInt(env("INGEST_RATE_LIMIT_RPS", "200"), 10, 64)
+	if err != nil || rps < 1 {
+		return fmt.Errorf("INGEST_RATE_LIMIT_RPS must be a positive integer, got %q", os.Getenv("INGEST_RATE_LIMIT_RPS"))
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -75,9 +88,17 @@ func run(logger *slog.Logger) error {
 	}
 	defer kafka.Close()
 
-	srv := &api.Server{
+	// Redis connects lazily, so ingest starts (and fails open) even if Redis is down.
+	redisClient := ratelimit.NewClient(redisAddr)
+	defer redisClient.Close()
+
+	svc := &ingest.Service{
 		Keys:     auth.NewCache(auth.Postgres{Pool: pg}, 60*time.Second),
+		Limiter:  ratelimit.Redis{Client: redisClient, Limit: rps},
 		Producer: kafkaProducer{kafka},
+	}
+	srv := &api.Server{
+		Ingest: svc,
 		Ready: map[string]api.Pinger{
 			"kafka":    kafka.Ping,
 			"postgres": pg.Ping,
@@ -85,12 +106,19 @@ func run(logger *slog.Logger) error {
 		Logger: logger,
 	}
 	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	grpcSrv := grpcapi.NewServer(svc, logger)
+	grpcLis, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		return err
+	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
-		logger.Info("ingest-svc listening", "addr", addr, "kafka_brokers", brokers)
+		logger.Info("ingest-svc listening", "http_addr", addr, "grpc_addr", grpcAddr,
+			"kafka_brokers", brokers, "redis_addr", redisAddr, "rate_limit_rps", rps)
 		errCh <- httpSrv.ListenAndServe()
 	}()
+	go func() { errCh <- grpcSrv.Serve(grpcLis) }()
 
 	select {
 	case err := <-errCh:
@@ -98,14 +126,24 @@ func run(logger *slog.Logger) error {
 	case <-ctx.Done():
 	}
 
-	// SIGTERM: stop accepting connections and wait for in-flight requests. Each of those is waiting
-	// on its own Kafka ack, so when Shutdown returns every 202 we sent is durable. Flush anyway in
-	// case a request was cut off by the timeout, then the deferred Close calls run.
+	// SIGTERM: both servers stop accepting work and wait for in-flight requests. Each of those is
+	// waiting on its own Kafka ack, so once both return every 202/OK we sent is durable. Flush anyway
+	// in case a request was cut off by the timeout, then the deferred Close calls run.
 	logger.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	grpcDone := make(chan struct{})
+	go func() { grpcSrv.GracefulStop(); close(grpcDone) }()
+	httpErr := httpSrv.Shutdown(shutdownCtx)
+	if errors.Is(httpErr, http.ErrServerClosed) {
+		httpErr = nil
 	}
-	return kafka.Flush(shutdownCtx)
+	// Wait for gRPC even if HTTP timed out, so no handler is mid-produce when Kafka closes.
+	select {
+	case <-grpcDone:
+	case <-shutdownCtx.Done():
+		grpcSrv.Stop() // GracefulStop has no timeout of its own
+		<-grpcDone
+	}
+	return errors.Join(httpErr, kafka.Flush(shutdownCtx))
 }

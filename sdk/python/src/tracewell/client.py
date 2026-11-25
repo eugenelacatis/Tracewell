@@ -133,7 +133,7 @@ class Tracewell:
         flush_interval_s: float | None = None,
         max_batch_traces: int | None = None,
     ) -> None:
-        host = (host or os.environ.get("TRACEWELL_HOST") or "http://localhost:8081").rstrip("/")
+        host = (host or os.environ.get("TRACEWELL_HOST") or "http://localhost:8080").rstrip("/")
         api_key = api_key or os.environ.get("TRACEWELL_API_KEY", "")
         tuning = {
             k: v

@@ -1,4 +1,5 @@
 // Package api serves POST /v1/ingest and the health endpoints, following docs/contracts/http.md.
+// Auth, rate limiting, validation and the Kafka write live in internal/ingest, shared with gRPC.
 package api
 
 import (
@@ -10,7 +11,6 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,49 +20,30 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	tracewellv1 "github.com/eugenelacatis/tracewell/proto/tracewellv1"
-	"github.com/eugenelacatis/tracewell/services/ingest/internal/auth"
+	"github.com/eugenelacatis/tracewell/services/ingest/internal/ingest"
 )
 
-// MaxBodyBytes is the request size limit from the contract. Bigger bodies get 413.
-const MaxBodyBytes = 5 << 20
+const ingestRoute = "POST /v1/ingest"
 
-// produceTimeout bounds how long a request waits for the Kafka ack before answering 503.
-const produceTimeout = 10 * time.Second
-
-var (
-	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name: "ingest_http_request_duration_seconds",
-		Help: "POST /v1/ingest latency by response status, including the wait for the Kafka ack.",
-	}, []string{"status"})
-	tracesAccepted = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "ingest_traces_accepted_total",
-		Help: "Traces written to traces.raw.",
-	})
-)
-
-// Keys resolves an API key to its project. auth.Cache in production.
-type Keys interface {
-	ProjectID(ctx context.Context, key string) (string, error)
-}
-
-// Producer writes one record to traces.raw and returns once the broker has acked it (acks=all).
-type Producer interface {
-	Produce(ctx context.Context, key string, value []byte) error
-}
+var requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name: "ingest_http_request_duration_seconds",
+	Help: "HTTP request latency by route and response status, including the wait for the Kafka ack.",
+}, []string{"route", "status"})
 
 // Pinger checks one dependency for /readyz.
 type Pinger func(ctx context.Context) error
 
 type Server struct {
-	Keys     Keys
-	Producer Producer
-	Ready    map[string]Pinger
-	Logger   *slog.Logger
+	Ingest *ingest.Service
+	// Ready lists what /readyz checks: Kafka and Postgres. Not Redis, because the rate limit fails
+	// open, so a Redis outage must not take ingest out of rotation.
+	Ready  map[string]Pinger
+	Logger *slog.Logger
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/ingest", s.ingest)
+	mux.HandleFunc(ingestRoute, s.ingest)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") })
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.Handle("GET /metrics", promhttp.Handler())
@@ -72,26 +53,21 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	status := s.handleIngest(w, r)
-	requestDuration.WithLabelValues(strconv.Itoa(status)).Observe(time.Since(start).Seconds())
+	requestDuration.WithLabelValues(ingestRoute, strconv.Itoa(status)).Observe(time.Since(start).Seconds())
 }
 
 // handleIngest writes the response and returns its status code.
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) int {
-	key, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || key == "" {
-		return writeError(w, http.StatusUnauthorized, "unauthorized", "missing bearer api key")
+	log := s.Logger
+	if id := r.Header.Get("X-Request-Id"); id != "" {
+		log = log.With("request_id", id)
 	}
-	projectID, err := s.Keys.ProjectID(r.Context(), key)
-	if errors.Is(err, auth.ErrUnknownKey) {
-		return writeError(w, http.StatusUnauthorized, "unauthorized", "invalid api key")
-	}
+	projectID, err := s.Ingest.Authorize(r.Context(), log, r.Header.Get("Authorization"))
 	if err != nil {
-		s.Logger.Error("api key lookup failed", "err", err)
-		return writeError(w, http.StatusServiceUnavailable, "unavailable", "auth backend unavailable")
+		return writeIngestError(w, err)
 	}
-	log := s.Logger.With("project_id", projectID)
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxBodyBytes))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, ingest.MaxBatchBytes))
 	var tooBig *http.MaxBytesError
 	if errors.As(err, &tooBig) {
 		return writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "body over 5 MB")
@@ -99,38 +75,38 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) int {
 	if err != nil {
 		return writeError(w, http.StatusBadRequest, "invalid_argument", "could not read body")
 	}
-
 	batch := &tracewellv1.IngestBatch{}
 	if err := decode(r.Header.Get("Content-Type"), body, batch); err != nil {
-		log.Warn("rejected batch", "err", err)
+		log.Warn("rejected batch", "project_id", projectID, "err", err)
 		return writeError(w, http.StatusBadRequest, "invalid_argument", err.Error())
 	}
-	if batch.IdempotencyKey == "" {
-		return writeError(w, http.StatusBadRequest, "invalid_argument", "idempotencyKey is required")
-	}
-	log = log.With("idempotency_key", batch.IdempotencyKey)
 
-	// project_id comes only from the API key. Whatever the client put in the body is replaced.
-	batch.ProjectId = projectID
-	for _, t := range batch.Traces {
-		t.ProjectId = projectID
-	}
-
-	value, err := proto.Marshal(batch)
+	accepted, err := s.Ingest.Write(r.Context(), log, projectID, batch)
 	if err != nil {
-		log.Error("marshal batch", "err", err)
-		return writeError(w, http.StatusInternalServerError, "internal", "could not encode batch")
+		return writeIngestError(w, err)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), produceTimeout)
-	defer cancel()
-	if err := s.Producer.Produce(ctx, projectID, value); err != nil {
-		log.Error("kafka produce failed", "err", err)
-		return writeError(w, http.StatusServiceUnavailable, "unavailable", "could not write to kafka")
-	}
+	return writeJSON(w, http.StatusAccepted, map[string]int{"accepted": accepted})
+}
 
-	tracesAccepted.Add(float64(len(batch.Traces)))
-	log.Info("accepted batch", "traces", len(batch.Traces), "batch_seq", batch.BatchSeq)
-	return writeJSON(w, http.StatusAccepted, map[string]int{"accepted": len(batch.Traces)})
+// writeIngestError maps an *ingest.Error to the HTTP status and error code in the contract.
+func writeIngestError(w http.ResponseWriter, err error) int {
+	var e *ingest.Error
+	if !errors.As(err, &e) {
+		return writeError(w, http.StatusInternalServerError, "internal", "internal error")
+	}
+	switch e.Code {
+	case ingest.InvalidArgument:
+		return writeError(w, http.StatusBadRequest, "invalid_argument", e.Msg)
+	case ingest.Unauthorized:
+		return writeError(w, http.StatusUnauthorized, "unauthorized", e.Msg)
+	case ingest.RateLimited:
+		w.Header().Set("Retry-After", strconv.Itoa(ingest.RetryAfterSeconds))
+		return writeError(w, http.StatusTooManyRequests, "rate_limited", e.Msg)
+	case ingest.Unavailable:
+		return writeError(w, http.StatusServiceUnavailable, "unavailable", e.Msg)
+	default:
+		return writeError(w, http.StatusInternalServerError, "internal", e.Msg)
+	}
 }
 
 // decode parses body as protojson or binary protobuf, picked by Content-Type.

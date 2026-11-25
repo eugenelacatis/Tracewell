@@ -109,7 +109,7 @@ func TestRetriesThenSucceeds(t *testing.T) {
 	if ins.calls != 3 || len(ins.stored) != 1 || len(dlq.sent) != 0 {
 		t.Fatalf("calls = %d, stored = %d, dlq = %d", ins.calls, len(ins.stored), len(dlq.sent))
 	}
-	if len(*slept) != 2 || (*slept)[0] != 500*time.Millisecond || (*slept)[1] != time.Second {
+	if len(*slept) != 2 || (*slept)[0] != 2*time.Second || (*slept)[1] != 5*time.Second {
 		t.Fatalf("backoff = %v", *slept)
 	}
 }
