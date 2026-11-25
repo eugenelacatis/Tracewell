@@ -1,0 +1,11 @@
+# Strimzi runs the exporter pod but gives it no Service. This one maps 9308 -> the pod's 9404 so the
+# scrape target in deploy/monitoring/prometheus.yml (kafka-exporter:9308) is the same as in compose.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-exporter
+spec:
+  selector:
+    strimzi.io/name: tracewell-kafka-exporter
+  ports:
+    - { name: metrics, port: 9308, targetPort: 9404 }

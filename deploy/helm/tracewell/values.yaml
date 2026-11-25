@@ -1,0 +1,102 @@
+# Backing services live outside this chart (Strimzi Kafka, the ClickHouse operator). These are their
+# in-cluster addresses; every service's env below is built from them.
+global:
+  kafkaBrokers: tracewell-kafka-bootstrap:9092
+  clickhouseDsn: clickhouse://tracewell:tracewell@clickhouse-tracewell:9000/tracewell
+  postgresDsn: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
+  redisAddr: redis:6379
+
+image:
+  tag: dev
+  # Images are built locally and loaded with `kind load docker-image`, so never pull.
+  pullPolicy: Never
+
+# One Deployment + Service per entry. Env values are templated, so they can use {{ .Values.global.* }}.
+# Service names (the map keys) match the compose service names; Envoy's config routes to them by name.
+services:
+  ingest:
+    image: tracewell/ingest
+    port: 8081
+    extraPorts:
+      - { name: grpc, port: 9091 }
+    env:
+      INGEST_HTTP_ADDR: ":8081"
+      INGEST_GRPC_ADDR: ":9091"
+      INGEST_KAFKA_BROKERS: "{{ .Values.global.kafkaBrokers }}"
+      INGEST_POSTGRES_DSN: "{{ .Values.global.postgresDsn }}"
+      INGEST_REDIS_ADDR: "{{ .Values.global.redisAddr }}"
+      INGEST_RATE_LIMIT_RPS: "200"
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 256Mi } }
+  writer:
+    image: tracewell/writer
+    port: 8084
+    env:
+      WRITER_HTTP_ADDR: ":8084"
+      WRITER_KAFKA_BROKERS: "{{ .Values.global.kafkaBrokers }}"
+      WRITER_CLICKHOUSE_DSN: "{{ .Values.global.clickhouseDsn }}"
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 256Mi } }
+  query:
+    image: tracewell/query
+    port: 8082
+    env:
+      QUERY_HTTP_ADDR: ":8082"
+      QUERY_CLICKHOUSE_DSN: "{{ .Values.global.clickhouseDsn }}"
+      QUERY_POSTGRES_DSN: "{{ .Values.global.postgresDsn }}"
+      QUERY_REDIS_ADDR: "{{ .Values.global.redisAddr }}"
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 256Mi } }
+  alerter:
+    image: tracewell/alerter
+    port: 8083
+    env:
+      ALERTER_HTTP_ADDR: ":8083"
+      ALERTER_KAFKA_BROKERS: "{{ .Values.global.kafkaBrokers }}"
+      ALERTER_POSTGRES_DSN: "{{ .Values.global.postgresDsn }}"
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 256Mi } }
+  evals:
+    image: tracewell/evals
+    port: 8085
+    # Known gap (Track C): evals /readyz hangs, so readiness uses /healthz until that is fixed.
+    readinessPath: /healthz
+    env:
+      EVALS_HTTP_ADDR: ":8085"
+      EVALS_KAFKA_BROKERS: "{{ .Values.global.kafkaBrokers }}"
+    resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { memory: 512Mi } }
+  web:
+    image: tracewell/web
+    port: 3000
+    # Known gap (Track D): web has no /healthz yet, so probes are a TCP check on the port.
+    probe: tcp
+    env:
+      WEB_QUERY_URL: http://gateway:8080
+    resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { memory: 512Mi } }
+  gateway:
+    # Stock Envoy. The config comes from a ConfigMap that deploy/kind/up.sh creates from
+    # gateway/envoy.yaml (Helm can't read files outside the chart).
+    image: envoyproxy/envoy
+    imageTag: v1.31.2
+    pullPolicy: IfNotPresent
+    port: 8080
+    extraPorts:
+      - { name: admin, port: 9901 }
+    # Envoy's admin port answers 200 on /ready once it has its config.
+    healthPort: 9901
+    livenessPath: /ready
+    readinessPath: /ready
+    args: ["-c", "/etc/envoy/envoy.yaml"]
+    configMap: { name: gateway-config, mountPath: /etc/envoy }
+    service: { type: NodePort, nodePort: 30080 }
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 256Mi } }
+
+# Single instances, same images as docker-compose. Credentials are local dev only.
+postgres:
+  enabled: true
+  image: postgres:16
+  storage: 1Gi
+  # ConfigMap holding deploy/migrations/postgres/*.sql, created by deploy/kind/up.sh. Mounted for first-run
+  # init, and re-applied by the post-install/upgrade migrate Job, so existing volumes get new files too.
+  migrationsConfigMap: postgres-migrations
+  resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { memory: 512Mi } }
+redis:
+  enabled: true
+  image: redis:7
+  resources: { requests: { cpu: 20m, memory: 32Mi }, limits: { memory: 128Mi } }

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tracewell
+description: Tracewell apps (ingest, writer, query, alerter, evals, web, gateway) plus single-instance Postgres and Redis
+type: application
+version: 0.1.0
+appVersion: "dev"

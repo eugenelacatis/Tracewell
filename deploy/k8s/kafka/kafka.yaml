@@ -1,0 +1,51 @@
+# Strimzi Kafka for kind: 3 nodes in KRaft mode, each both broker and controller (no ZooKeeper).
+# Apply into the `tracewell` namespace. Needs the Strimzi operator (deploy/kind/up.sh installs it).
+# Clients use tracewell-kafka-bootstrap:9092, which is what deploy/helm/tracewell/values.yaml points at.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: dual-role
+  labels:
+    strimzi.io/cluster: tracewell
+spec:
+  replicas: 3
+  roles: [controller, broker]
+  storage:
+    type: jbod
+    volumes:
+      - { id: 0, type: persistent-claim, size: 2Gi, deleteClaim: true }
+  resources:
+    requests: { cpu: 100m, memory: 512Mi }
+    limits: { memory: 768Mi }
+  jvmOptions:
+    # Heap well under the memory limit, because Kafka also uses page cache and off-heap memory.
+    -Xms: 256m
+    -Xmx: 384m
+---
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: tracewell
+spec:
+  kafka:
+    # No version pinned: Strimzi 1.x defaults to the newest Kafka it supports (4.x), KRaft only.
+    listeners:
+      - { name: plain, port: 9092, type: internal, tls: false }
+    config:
+      # Topics come only from the KafkaTopic resources (topics.yaml), never from a stray client.
+      auto.create.topics.enable: false
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+  entityOperator:
+    topicOperator: {}
+  # Consumer-group lag. Pod port 9404; kafka-exporter-service.yaml exposes it as kafka-exporter:9308 so
+  # the shared deploy/monitoring/prometheus.yml works unchanged.
+  kafkaExporter:
+    topicRegex: ".*"
+    groupRegex: ".*"
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits: { memory: 128Mi }

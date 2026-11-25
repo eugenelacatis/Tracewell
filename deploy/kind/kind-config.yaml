@@ -1,0 +1,15 @@
+# 1 control plane + 3 workers. The two host ports are mapped on the control-plane node; a NodePort answers
+# on every node, so traffic reaches the right pod wherever it runs.
+#   localhost:8080 -> gateway   (NodePort 30080, set in deploy/helm/tracewell/values.yaml)
+#   localhost:3300 -> Grafana   (NodePort 30300, deploy/k8s/monitoring/monitoring.yaml)
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: tracewell
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - { containerPort: 30080, hostPort: 8080, protocol: TCP }
+      - { containerPort: 30300, hostPort: 3300, protocol: TCP }
+  - role: worker
+  - role: worker
+  - role: worker

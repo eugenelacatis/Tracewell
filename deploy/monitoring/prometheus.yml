@@ -1,0 +1,25 @@
+# Prometheus config shared by compose (`monitoring` profile) and kind. Targets are service names, which
+# are the same in both (compose service names, k8s Service names in one namespace).
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: ingest
+    static_configs: [{ targets: ["ingest:8081"] }]
+  - job_name: query
+    static_configs: [{ targets: ["query:8082"] }]
+  - job_name: alerter
+    static_configs: [{ targets: ["alerter:8083"] }]
+  - job_name: writer
+    static_configs: [{ targets: ["writer:8084"] }]
+  - job_name: evals
+    static_configs: [{ targets: ["evals:8085"] }]
+  # Envoy's admin port serves Prometheus text on /stats/prometheus.
+  - job_name: gateway
+    metrics_path: /stats/prometheus
+    static_configs: [{ targets: ["gateway:9901"] }]
+  # Consumer-group lag (kafka_consumergroup_lag). On kind, a Service called kafka-exporter on port 9308
+  # points at Strimzi's exporter pods, so this target is the same there.
+  - job_name: kafka-exporter
+    static_configs: [{ targets: ["kafka-exporter:9308"] }]

@@ -1,0 +1,97 @@
+{{- range $name, $svc := .Values.services }}
+{{- $healthPort := default $svc.port $svc.healthPort }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    app: {{ $name }}
+    {{- include "tracewell.labels" $ | nindent 4 }}
+spec:
+  replicas: {{ default 1 $svc.replicas }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+        {{- include "tracewell.labels" $ | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: {{ $name }}
+          image: {{ $svc.image }}:{{ default $.Values.image.tag $svc.imageTag }}
+          imagePullPolicy: {{ default $.Values.image.pullPolicy $svc.pullPolicy }}
+          {{- with $svc.args }}
+          args: {{ toJson . }}
+          {{- end }}
+          ports:
+            - { name: http, containerPort: {{ $svc.port }} }
+            {{- range $svc.extraPorts }}
+            - { name: {{ .name }}, containerPort: {{ .port }} }
+            {{- end }}
+          {{- with $svc.env }}
+          env:
+            {{- range $k, $v := . }}
+            - name: {{ $k }}
+              value: {{ tpl (toString $v) $ | quote }}
+            {{- end }}
+          {{- end }}
+          {{- if eq (default "http" $svc.probe) "tcp" }}
+          livenessProbe:
+            tcpSocket: { port: {{ $healthPort }} }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket: { port: {{ $healthPort }} }
+            periodSeconds: 5
+          {{- else }}
+          livenessProbe:
+            httpGet: { path: {{ default "/healthz" $svc.livenessPath }}, port: {{ $healthPort }} }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: {{ default "/readyz" $svc.readinessPath }}, port: {{ $healthPort }} }
+            periodSeconds: 5
+            timeoutSeconds: 3
+          {{- end }}
+          {{- with $svc.resources }}
+          resources: {{ toJson . }}
+          {{- end }}
+          {{- with $svc.configMap }}
+          volumeMounts:
+            - { name: config, mountPath: {{ .mountPath }}, readOnly: true }
+          {{- end }}
+      {{- with $svc.configMap }}
+      volumes:
+        - name: config
+          configMap: { name: {{ .name }} }
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    app: {{ $name }}
+    {{- include "tracewell.labels" $ | nindent 4 }}
+spec:
+  type: {{ default "ClusterIP" (get (default dict $svc.service) "type") }}
+  selector:
+    app: {{ $name }}
+  ports:
+    - name: http
+      port: {{ $svc.port }}
+      targetPort: http
+      {{- with (get (default dict $svc.service) "nodePort") }}
+      nodePort: {{ . }}
+      {{- end }}
+    {{- range $svc.extraPorts }}
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .name }}
+    {{- end }}
+{{- end }}

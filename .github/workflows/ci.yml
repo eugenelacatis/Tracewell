@@ -121,4 +121,50 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      # Build first so a broken Dockerfile fails here, on its own, before the stack is started. The smoke
+      # script builds again, but from the cache, so it adds little.
+      - name: Build all images
+        run: docker compose --profile apps build
       - run: bash deploy/scripts/smoke.sh
+
+  # Checks the deploy/ files without a cluster: the Helm chart renders and matches the Kubernetes
+  # schemas, the Strimzi and ClickHouse manifests match their CRD schemas, the compose files parse, the
+  # Prometheus config and Grafana dashboard are valid, and the migration copies still equal the contracts.
+  deploy-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.0
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz \
+            | tar -xz -C /usr/local/bin kubeconform
+      - name: Helm chart
+        run: |
+          helm lint deploy/helm/tracewell
+          helm template tracewell deploy/helm/tracewell | kubeconform -strict -summary
+          # Also the shape used when gateway/envoy.yaml isn't there yet (see deploy/kind/up.sh).
+          helm template tracewell deploy/helm/tracewell --set services.gateway=null | kubeconform -strict -summary
+      - name: Kafka, ClickHouse and monitoring manifests
+        run: |
+          kubeconform -strict -summary -ignore-missing-schemas \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            deploy/k8s
+      - name: Compose files
+        run: docker compose --profile apps --profile monitoring config -q
+      - name: Prometheus config and Grafana dashboard
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/deploy/monitoring:/m:ro" \
+            prom/prometheus:v2.54.1 check config /m/prometheus.yml
+          jq -e . deploy/monitoring/dashboards/tracewell.json >/dev/null
+      - name: Migrations match the contracts
+        run: |
+          cmp docs/contracts/postgres.sql deploy/migrations/postgres/001_init.sql
+          cmp docs/contracts/postgres_round2.sql deploy/migrations/postgres/002_round2.sql
+          cmp docs/contracts/clickhouse.sql deploy/migrations/clickhouse/001_init.sql
+          cmp docs/contracts/clickhouse_cluster.sql deploy/migrations/clickhouse-cluster/001_cluster.sql
+      - name: Scripts parse
+        run: for f in deploy/scripts/*.sh deploy/kind/*.sh; do bash -n "$f"; done

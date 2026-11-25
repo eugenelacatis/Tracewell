@@ -18,6 +18,8 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_NUM_PARTITIONS: 6
+      # Cap the JVM heap so a laptop isn't squeezed (the default is 1 GB min, up to 25% of RAM).
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null"]
       interval: 10s
@@ -94,6 +96,26 @@ services:
       interval: 5s
       retries: 20
 
+  # One-shot job: applies every Postgres migration on each `up`, so existing volumes pick up new files
+  # (the initdb mount above only runs on an empty volume). Every file is idempotent, so re-running is harmless.
+  migrate:
+    image: postgres:16
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+    environment:
+      PGPASSWORD: tracewell
+    volumes:
+      - ./deploy/migrations/postgres:/migrations:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for f in /migrations/*.sql; do
+          echo "applying $$f"
+          psql -h postgres -U tracewell -d tracewell -v ON_ERROR_STOP=1 -q -f "$$f"
+        done
+
   redis:
     image: redis:7
     ports:
@@ -116,11 +138,17 @@ services:
     build: { context: ., dockerfile: services/ingest/Dockerfile }
     ports:
       - "8081:8081"
+      - "9091:9091"
     environment:
       INGEST_HTTP_ADDR: ":8081"
+      INGEST_GRPC_ADDR: ":9091"
       INGEST_KAFKA_BROKERS: kafka:29092
       INGEST_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
+      INGEST_REDIS_ADDR: redis:6379
+      INGEST_RATE_LIMIT_RPS: "200"
     depends_on:
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
       kafka-init: { condition: service_completed_successfully }
       postgres: { condition: service_healthy }
     healthcheck:
@@ -154,7 +182,10 @@ services:
       QUERY_HTTP_ADDR: ":8082"
       QUERY_CLICKHOUSE_DSN: clickhouse://tracewell:tracewell@clickhouse:9000/tracewell
       QUERY_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
+      QUERY_REDIS_ADDR: redis:6379
     depends_on:
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
       clickhouse: { condition: service_healthy }
       postgres: { condition: service_healthy }
     healthcheck:
@@ -172,6 +203,7 @@ services:
       ALERTER_KAFKA_BROKERS: kafka:29092
       ALERTER_POSTGRES_DSN: postgres://tracewell:tracewell@postgres:5432/tracewell?sslmode=disable
     depends_on:
+      migrate: { condition: service_completed_successfully }
       kafka-init: { condition: service_completed_successfully }
       postgres: { condition: service_healthy }
     healthcheck:
@@ -202,10 +234,70 @@ services:
     ports:
       - "3000:3000"
     environment:
-      WEB_QUERY_URL: http://query:8082
-      WEB_API_KEY: tw_dev_localkey
+      # The dashboard's server code calls the gateway. The browser never does (see docs/contracts/README.md).
+      WEB_QUERY_URL: http://gateway:8080
     depends_on:
       query: { condition: service_healthy }
+
+  # Envoy front door: one listener on 8080 for HTTP and gRPC, admin on 9901. The config file is Track D's
+  # (gateway/envoy.yaml). Until it exists, start the rest with `--scale gateway=0`.
+  # Routes upstream by service name (ingest, query), so those names must stay the same in compose and k8s.
+  gateway:
+    profiles: [apps]
+    image: envoyproxy/envoy:v1.31.2
+    ports:
+      - "8080:8080"
+      - "9901:9901"
+    volumes:
+      - ./gateway/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    depends_on:
+      ingest: { condition: service_healthy }
+      query: { condition: service_healthy }
+    healthcheck:
+      # The envoy image has no curl or wget; bash's /dev/tcp opens the admin port and /ready answers 200.
+      test:
+        - CMD-SHELL
+        - >-
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/9901 &&
+          printf "GET /ready HTTP/1.0\r\n\r\n" >&3 && grep -q "200 OK" <&3'
+      interval: 5s
+      retries: 12
+
+  # ---- Monitoring ---------------------------------------------------------------------------------
+  # Off by default. Run alongside the apps with:
+  #   docker compose --profile apps --profile monitoring up -d
+  # Grafana: http://localhost:3300 (admin / tracewell). Prometheus: http://localhost:9090.
+  # The same prometheus.yml and dashboard JSON are used on kind (deploy/monitoring/).
+
+  # Reads consumer-group offsets from Kafka and exposes kafka_consumergroup_lag.
+  kafka-exporter:
+    profiles: [monitoring]
+    image: danielqsj/kafka-exporter:v1.8.0
+    command: ["--kafka.server=kafka:29092"]
+    depends_on:
+      kafka: { condition: service_healthy }
+
+  prometheus:
+    profiles: [monitoring]
+    image: prom/prometheus:v2.54.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    profiles: [monitoring]
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3300:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: tracewell
+    volumes:
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/monitoring/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
 
 volumes:
   clickhouse-data:

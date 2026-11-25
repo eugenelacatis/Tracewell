@@ -1,0 +1,99 @@
+{{- if .Values.postgres.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels: { app: postgres }
+spec:
+  selector: { app: postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+    {{- include "tracewell.labels" . | nindent 4 }}
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          env:
+            - { name: POSTGRES_DB, value: tracewell }
+            - { name: POSTGRES_USER, value: tracewell }
+            - { name: POSTGRES_PASSWORD, value: tracewell }
+            # The volume root has lost+found, which initdb refuses, so data goes in a subdirectory.
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "tracewell", "-d", "tracewell"] }
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["pg_isready", "-U", "tracewell", "-d", "tracewell"] }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources: {{ toJson .Values.postgres.resources }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            # Runs only on an empty volume, same as compose. The migrate Job covers existing volumes.
+            - { name: migrations, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
+      volumes:
+        - name: migrations
+          configMap: { name: {{ .Values.postgres.migrationsConfigMap }} }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}
+---
+# Applies every migration after each install/upgrade, so a volume created by an older release still gets
+# new files. All migration files are idempotent.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-migrate
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: {{ .Values.postgres.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: PGPASSWORD, value: tracewell }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              until pg_isready -h postgres -U tracewell -d tracewell; do sleep 2; done
+              for f in /migrations/*.sql; do
+                echo "applying $f"
+                psql -h postgres -U tracewell -d tracewell -v ON_ERROR_STOP=1 -q -f "$f"
+              done
+          volumeMounts:
+            - { name: migrations, mountPath: /migrations, readOnly: true }
+      volumes:
+        - name: migrations
+          configMap: { name: {{ .Values.postgres.migrationsConfigMap }} }
+{{- end }}
