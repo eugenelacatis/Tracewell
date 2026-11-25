@@ -77,7 +77,25 @@ func main() {
 		}
 	}()
 
-	// 5. Ready check for /readyz (Postgres ping + Kafka connection check)
+	// 5. Start periodic sliding window evaluation ticker (every 10s)
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				evalCtx, evalCancel := context.WithTimeout(ctx, 5*time.Second)
+				if err := alertEngine.EvaluateAll(evalCtx, time.Now()); err != nil {
+					logger.Error("periodic rule evaluation failed", "error", err)
+				}
+				evalCancel()
+			}
+		}
+	}()
+
+	// 6. Ready check for /readyz (Postgres ping + Kafka connection check)
 	brokers := consumer.SplitBrokers(kafkaBrokersRaw)
 	readyCheck := func(checkCtx context.Context) error {
 		if err := pgStore.Ping(checkCtx); err != nil {
@@ -97,7 +115,7 @@ func main() {
 		return fmt.Errorf("kafka brokers unreachable: %w", dialErr)
 	}
 
-	// 6. Start HTTP server (:8083)
+	// 7. Start HTTP server (:8083)
 	httpSrv := server.NewServer(httpAddr, readyCheck)
 	go func() {
 		if err := httpSrv.Start(); err != nil {
@@ -105,7 +123,7 @@ func main() {
 		}
 	}()
 
-	// 7. Start Kafka Consumer
+	// 8. Start Kafka Consumer
 	kafkaConsumer := consumer.NewConsumer(brokers, groupID, topic, alertEngine, logger)
 	go func() {
 		if err := kafkaConsumer.Run(ctx); err != nil {
@@ -113,7 +131,7 @@ func main() {
 		}
 	}()
 
-	// 8. Graceful shutdown on SIGTERM / SIGINT
+	// 9. Graceful shutdown on SIGTERM / SIGINT
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
@@ -140,4 +158,3 @@ func getEnv(key, defaultVal string) string {
 	}
 	return defaultVal
 }
-

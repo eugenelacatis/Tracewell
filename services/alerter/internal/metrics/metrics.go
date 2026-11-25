@@ -16,15 +16,22 @@ var (
 		Help: "Total number of error spans (STATUS_ERROR) encountered by alerter",
 	})
 
+	RulesLoaded = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "alerter_rules_loaded",
+		Help: "Number of active enabled alert rules currently loaded in memory",
+	})
+
+	ActiveRules = RulesLoaded
+
 	AlertsFired = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "alerter_alerts_fired_total",
 		Help: "Total number of alert rules triggered",
-	}, []string{"rule_id", "project_id", "channel"})
+	}, []string{"metric", "channel"})
 
-	ActiveRules = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "alerter_rules_active",
-		Help: "Number of active enabled alert rules currently loaded in memory",
-	})
+	DeliveryErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "alerter_delivery_errors_total",
+		Help: "Total count of alert delivery errors to destination channels",
+	}, []string{"channel"})
 
 	RuleReloads = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "alerter_rule_reloads_total",
@@ -36,4 +43,3 @@ var (
 		Help: "Total count of errors encountered while reloading alert rules",
 	})
 )
-
